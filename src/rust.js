@@ -1,5 +1,5 @@
 const RustPlus = require('@liamcottle/rustplus.js');
-const { handleRustCommand, MARKER } = require('./commands');
+const { handleRustCommand, MARKER, getOilRigState } = require('./commands');
 
 function uniqSorted(values) { return [...new Set(values.map(String))].sort(); }
 function intersectionSize(a, b) {
@@ -40,7 +40,8 @@ class RustManager {
       teamInfo: null, teamContextId: null, teamStatus: 'CHECKING', teamError: null, teamStatusChangedAt: Date.now(),
       chatStatus: 'CHECKING', chatError: null,
       teamInfoDebugLogged: false, teamContextDebugLogged: false,
-      eventPollTimer: null, eventPollInFlight: false, eventPrimed: false
+      eventPollTimer: null, eventPollInFlight: false, eventPrimed: false,
+      memberState: new Map(), mapSize: null
     };
     this.sessions.set(account.id, session);
 
@@ -57,6 +58,7 @@ class RustManager {
       this.#startChatPolling(session);
       this.#refreshTeamInfo(session).catch(() => {});
       this.#startTeamPolling(session);
+      this.#primeServerMeta(session).catch(() => {});
       this.#startEventPolling(session);
     });
 
@@ -263,6 +265,66 @@ class RustManager {
   }
   #stopTeamPolling(session) { if (session.teamPollTimer) clearInterval(session.teamPollTimer); session.teamPollTimer = null; session.teamPollInFlight = false; }
 
+  async #primeServerMeta(session) {
+    try {
+      const r = await session.rust.sendRequestAsync({ getInfo: {} }, 5000);
+      session.mapSize = Number(r?.info?.mapSize || 0) || null;
+    } catch (_) {}
+  }
+
+  #gridFromXY(x, y, mapSize) {
+    const size = Number(mapSize || 0);
+    if (!size) return null;
+    const cell = 150;
+    const col = Math.max(0, Math.floor(Number(x || 0) / cell));
+    const row = Math.max(0, Math.floor((size - Number(y || 0)) / cell));
+    let n = col, letters = '';
+    do { letters = String.fromCharCode(65 + (n % 26)) + letters; n = Math.floor(n / 26) - 1; } while (n >= 0);
+    return `${letters}${row}`;
+  }
+
+  #getDeathsForSession(session) {
+    const ctx = session?.teamContextId ? this.teamContexts.get(session.teamContextId) : null;
+    if (!ctx?.deathLog) return [];
+    const now = Date.now();
+    return ctx.deathLog.map((d) => ({ ...d, ago: this.#ago(now - d.at) }));
+  }
+
+  #ago(ms) {
+    const sec = Math.max(0, Math.floor(ms / 1000));
+    if (sec < 60) return `${sec}s temu`;
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m temu`;
+    return `${Math.floor(min / 60)}h temu`;
+  }
+
+  async #processDeaths(session) {
+    if (!session.teamInfo?.members?.length) return;
+    const current = new Map();
+    for (const m of session.teamInfo.members) current.set(String(m.steamId), { alive: Boolean(m.isAlive), name: m.name || String(m.steamId), x: Number(m.x || 0), y: Number(m.y || 0) });
+    if (!session.memberState.size) { session.memberState = current; return; }
+    if (!this.#isActiveSender(session)) { session.memberState = current; return; }
+    const ctx = this.teamContexts.get(session.teamContextId);
+    if (!ctx) { session.memberState = current; return; }
+    if (!ctx.deathLog) ctx.deathLog = [];
+    for (const [steamId, nowState] of current.entries()) {
+      const before = session.memberState.get(steamId);
+      if (!before || !before.alive || nowState.alive) continue;
+      const grid = this.#gridFromXY(nowState.x, nowState.y, session.mapSize);
+      const death = { steamId, name: nowState.name, x: nowState.x, y: nowState.y, grid, at: Date.now() };
+      const duplicate = ctx.deathLog.some((d) => d.steamId === steamId && Date.now() - d.at < 15000);
+      if (duplicate) continue;
+      ctx.deathLog.push(death);
+      while (ctx.deathLog.length > 20) ctx.deathLog.shift();
+      const where = grid ? `w sektorze ${grid}` : `na pozycji ${Math.round(nowState.x)}, ${Math.round(nowState.y)}`;
+      const msg = `💀 ${nowState.name} zginął ${where}.`;
+      try { session.rust.sendTeamMessage(msg); } catch (_) {}
+      this.discord.sendAlert(`[${session.account.name || ctx.serverKey}] ${msg}`).catch(() => {});
+      console.log(`[Deaths] ${ctx.id}: ${msg}`);
+    }
+    session.memberState = current;
+  }
+
   #startEventPolling(session) {
     this.#stopEventPolling(session);
     if (!this.eventAlertsEnabled) return;
@@ -286,11 +348,14 @@ class RustManager {
     try {
       const response = await session.rust.sendRequestAsync({ getMapMarkers: {} }, 5000);
       const markers = response?.mapMarkers?.markers || [];
+      const oils = await getOilRigState(session.rust, markers);
       const current = {
         cargo: markers.some((m) => Number(m.type) === MARKER.CARGO),
         heli: markers.some((m) => Number(m.type) === MARKER.PATROL_HELI),
         chinook: markers.some((m) => Number(m.type) === MARKER.CH47),
-        crate: markers.some((m) => Number(m.type) === MARKER.CRATE)
+        crate: markers.some((m) => Number(m.type) === MARKER.CRATE),
+        small: Boolean(oils.small.active),
+        large: Boolean(oils.large.active)
       };
       const ctx = this.teamContexts.get(session.teamContextId);
       if (!ctx) return;
@@ -304,7 +369,9 @@ class RustManager {
         cargo: ['🚢 Cargo Ship pojawił się na mapie!', '🚢 Cargo Ship zniknął z mapy.'],
         heli: ['🚁 Patrol Helicopter pojawił się!', '🚁 Patrol Helicopter zniknął.'],
         chinook: ['🚁 CH47/Chinook pojawił się!', '🚁 CH47/Chinook zniknął.'],
-        crate: ['📦 Locked Crate pojawiła się!', '📦 Locked Crate zniknęła.']
+        crate: ['📦 Locked Crate pojawiła się!', '📦 Locked Crate zniknęła.'],
+        small: ['🛢️ Small Oil Rig został aktywowany (Locked Crate)!', '🛢️ Small Oil Rig nie ma już aktywnego Locked Crate.'],
+        large: ['🛢️ Large Oil Rig został aktywowany (Locked Crate)!', '🛢️ Large Oil Rig nie ma już aktywnego Locked Crate.']
       };
       for (const [key, now] of Object.entries(current)) {
         const before = Boolean(ctx.eventState[key]);
@@ -397,6 +464,7 @@ class RustManager {
         }
       }
       this.#rebuildTeams();
+      await this.#processDeaths(session);
       this.#startChatPolling(session);
     } catch (err) {
       const code = this.#errorCode(err);
@@ -445,7 +513,7 @@ class RustManager {
         memberSteamIds: uniqSorted(sessions.map((x) => x.account.playerId)), leaderSteamId: '',
         sessionIds: sessions.map((x) => x.account.id), activeAccountId: activeId,
         createdAt: previous?.createdAt || Date.now(), updatedAt: Date.now(),
-        eventState: previous?.eventState || {}, eventPrimed: previous?.eventPrimed || false
+        eventState: previous?.eventState || {}, eventPrimed: previous?.eventPrimed || false, deathLog: previous?.deathLog || []
       };
       nextContexts.set(ctx.id, ctx);
       for (const sess of sessions) sess.teamContextId = ctx.id;
@@ -475,7 +543,7 @@ class RustManager {
         if(old.leaderSteamId && old.leaderSteamId===group.leaderSteamId) score+=10;
         if(score>bestScore){best=old;bestScore=score;}
       }
-      const ctx=best?{...best}:{id:`team-${this.nextTeamId++}`,createdAt:Date.now(),activeAccountId:null,eventState:{},eventPrimed:false,mode:'auto'};
+      const ctx=best?{...best}:{id:`team-${this.nextTeamId++}`,createdAt:Date.now(),activeAccountId:null,eventState:{},eventPrimed:false,deathLog:[],mode:'auto'};
       if(best) usedOld.add(best.id);
       ctx.mode='auto'; ctx.name=ctx.id; ctx.serverKey=group.serverKey; ctx.memberSteamIds=[...group.memberSteamIds]; ctx.leaderSteamId=group.leaderSteamId; ctx.sessionIds=group.sessions.map((x)=>x.account.id); ctx.updatedAt=Date.now();
       const valid=ctx.activeAccountId && ctx.sessionIds.includes(ctx.activeAccountId) && this.sessions.get(ctx.activeAccountId)?.connected;
@@ -554,7 +622,8 @@ class RustManager {
       const reply = await handleRustCommand({
         rust: session.rust, command, args,
         isAuthorized: () => this.#isSteamAuthorized(steamId),
-        linkHandler: (code) => this.#linkSteam(steamId, code)
+        linkHandler: (code) => this.#linkSteam(steamId, code),
+        getDeaths: () => this.#getDeathsForSession(session)
       });
       if (reply) session.rust.sendTeamMessage(String(reply).slice(0, 500));
     } catch (err) {

@@ -82,7 +82,7 @@ class DiscordManager {
       new SlashCommandBuilder().setName('item').setDescription('Policz materiały potrzebne do craftu itemu z RustClash Wiki.')
         .addStringOption(o=>o.setName('item').setDescription('Item, np. rocket, c4, satchel').setRequired(true).setAutocomplete(true))
         .addIntegerOption(o=>o.setName('amount').setDescription('Ilość do zrobienia').setRequired(true).setMinValue(1).setMaxValue(1000000)),
-      new SlashCommandBuilder().setName('items-refresh').setDescription('Odśwież listę itemów RustClash (admin).'),
+      new SlashCommandBuilder().setName('items-refresh').setDescription('Odśwież listę itemów z Rust Items API (admin).'),
       new SlashCommandBuilder().setName('teams').setDescription('Pokaż manualne teamy i ACTIVE/BACKUP.')
     ].map(c=>c.toJSON());
     const rest = new REST({ version: '10' }).setToken(this.config.discordToken);
@@ -204,7 +204,7 @@ class DiscordManager {
       }
       if (interaction.commandName === 'item') {
         if (!(await this.hasAccessRole(uid))) return interaction.reply({content:'⛔ Brak wymaganej roli Discord.',flags:ephemeral});
-        if (!this.rustClash) return interaction.reply({content:'❌ Moduł RustClash jest wyłączony.',flags:ephemeral});
+        if (!this.rustClash) return interaction.reply({content:'❌ Moduł itemów jest wyłączony.',flags:ephemeral});
         const item = interaction.options.getString('item', true);
         const amount = interaction.options.getInteger('amount', true);
         await interaction.deferReply();
@@ -212,19 +212,19 @@ class DiscordManager {
           const calc = await this.rustClash.calculate(item, amount);
           return interaction.editReply({ content: this.rustClash.formatCalculation(calc) });
         } catch (err) {
-          console.error('[RustClash] /item failed:', err);
+          console.error('[ItemsAPI] /item failed:', err);
           return interaction.editReply({ content: `❌ Nie udało się policzyć itemu: ${err.message || err}` });
         }
       }
       if (interaction.commandName === 'items-refresh') {
         if (!this.isAdmin(uid)) return interaction.reply({content:'⛔ Tylko administrator.',flags:ephemeral});
-        if (!this.rustClash) return interaction.reply({content:'❌ Moduł RustClash jest wyłączony.',flags:ephemeral});
+        if (!this.rustClash) return interaction.reply({content:'❌ Moduł itemów jest wyłączony.',flags:ephemeral});
         await interaction.deferReply({flags:ephemeral});
         try {
           const items = await this.rustClash.refreshIndex(true);
-          return interaction.editReply({content:`✅ Odświeżono bazę RustClash: **${items.length}** itemów.`});
+          return interaction.editReply({content:`✅ Odświeżono bazę itemów: **${items.length}** itemów.`});
         } catch (err) {
-          return interaction.editReply({content:`❌ RustClash refresh: ${err.message || err}`});
+          return interaction.editReply({content:`❌ Items API refresh: ${err.message || err}`});
         }
       }
       if (interaction.commandName === 'teams') {

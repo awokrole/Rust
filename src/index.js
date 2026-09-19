@@ -5,13 +5,16 @@ const { DiscordManager } = require('./discord');
 const { RustManager } = require('./rust');
 const { PairingManager } = require('./pairing');
 const { PairingApi } = require('./api');
+const { RustClashService } = require('./rustclash');
 
 async function main() {
   const secretBox = new SecretBox(config.encryptionKey);
   if (!secretBox.enabled) console.warn('[Security] ENCRYPTION_KEY missing: Rust+ tokens are not encrypted at rest.');
 
   const db = new JsonDb(config.dataDir, secretBox);
-  const discord = new DiscordManager({ config, db });
+  const rustClash = new RustClashService({ dataDir: config.dataDir });
+  await rustClash.init();
+  const discord = new DiscordManager({ config, db, rustClash });
   const rust = new RustManager({
     db,
     discord,

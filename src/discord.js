@@ -3,9 +3,10 @@ const {
 } = require('discord.js');
 
 class DiscordManager {
-  constructor({ config, db }) {
+  constructor({ config, db, rustClash = null }) {
     this.config = config;
     this.db = db;
+    this.rustClash = rustClash;
     this.rustManager = null;
     this.pairingManager = null;
     this.client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -78,6 +79,10 @@ class DiscordManager {
         .addStringOption(o=>o.setName('account').setDescription('ID konta z /rustaccounts').setRequired(true)),
       new SlashCommandBuilder().setName('team-unassign').setDescription('Wypisz swoje konto z manualnego teamu.').addStringOption(o=>o.setName('account').setDescription('ID konta').setRequired(true)),
       new SlashCommandBuilder().setName('team-remove').setDescription('Usuń swój manualny team.').addStringOption(o=>o.setName('team').setDescription('ID teamu').setRequired(true)),
+      new SlashCommandBuilder().setName('item').setDescription('Policz materiały potrzebne do craftu itemu z RustClash Wiki.')
+        .addStringOption(o=>o.setName('item').setDescription('Item, np. rocket, c4, satchel').setRequired(true).setAutocomplete(true))
+        .addIntegerOption(o=>o.setName('amount').setDescription('Ilość do zrobienia').setRequired(true).setMinValue(1).setMaxValue(1000000)),
+      new SlashCommandBuilder().setName('items-refresh').setDescription('Odśwież listę itemów RustClash (admin).'),
       new SlashCommandBuilder().setName('teams').setDescription('Pokaż manualne teamy i ACTIVE/BACKUP.')
     ].map(c=>c.toJSON());
     const rest = new REST({ version: '10' }).setToken(this.config.discordToken);
@@ -86,6 +91,16 @@ class DiscordManager {
   }
 
   async #onInteraction(interaction) {
+    if (interaction.isAutocomplete()) {
+      try {
+        if (interaction.commandName === 'item' && this.rustClash) {
+          const q = interaction.options.getFocused();
+          const choices = this.rustClash.searchItems(q, 25).map(x => ({ name: x.name.slice(0,100), value: x.slug.slice(0,100) }));
+          return interaction.respond(choices);
+        }
+      } catch (_) { try { await interaction.respond([]); } catch (_) {} }
+      return;
+    }
     if (!interaction.isChatInputCommand()) return;
     const uid = interaction.user.id;
     const ephemeral = MessageFlags.Ephemeral;
@@ -186,6 +201,31 @@ class DiscordManager {
         if(!t||(!this.isAdmin(uid)&&t.ownerDiscordId!==uid)) return interaction.reply({content:'⛔ Brak dostępu.',flags:ephemeral});
         this.db.removeManualTeam(tid); this.rustManager?.refreshRouting();
         return interaction.reply({content:`✅ Usunięto team **${t.name}**.`,flags:ephemeral});
+      }
+      if (interaction.commandName === 'item') {
+        if (!(await this.hasAccessRole(uid))) return interaction.reply({content:'⛔ Brak wymaganej roli Discord.',flags:ephemeral});
+        if (!this.rustClash) return interaction.reply({content:'❌ Moduł RustClash jest wyłączony.',flags:ephemeral});
+        const item = interaction.options.getString('item', true);
+        const amount = interaction.options.getInteger('amount', true);
+        await interaction.deferReply();
+        try {
+          const calc = await this.rustClash.calculate(item, amount);
+          return interaction.editReply({ content: this.rustClash.formatCalculation(calc) });
+        } catch (err) {
+          console.error('[RustClash] /item failed:', err);
+          return interaction.editReply({ content: `❌ Nie udało się policzyć itemu: ${err.message || err}` });
+        }
+      }
+      if (interaction.commandName === 'items-refresh') {
+        if (!this.isAdmin(uid)) return interaction.reply({content:'⛔ Tylko administrator.',flags:ephemeral});
+        if (!this.rustClash) return interaction.reply({content:'❌ Moduł RustClash jest wyłączony.',flags:ephemeral});
+        await interaction.deferReply({flags:ephemeral});
+        try {
+          const items = await this.rustClash.refreshIndex(true);
+          return interaction.editReply({content:`✅ Odświeżono bazę RustClash: **${items.length}** itemów.`});
+        } catch (err) {
+          return interaction.editReply({content:`❌ RustClash refresh: ${err.message || err}`});
+        }
       }
       if (interaction.commandName === 'teams') {
         const teams=this.db.listManualTeams().filter(t=>this.isAdmin(uid)||t.ownerDiscordId===uid);

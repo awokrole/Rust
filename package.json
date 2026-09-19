@@ -1,8 +1,8 @@
 {
   "name": "rust-helper-bot",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "private": true,
-  "description": "Discord-only Rust+ helper bot with Rust+ protobuf compatibility patch for newer servers.",
+  "description": "Discord-only Rust+ helper bot with event tracking, Oil Rig detection, deaths and multi-account routing.",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",

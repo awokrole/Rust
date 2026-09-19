@@ -1,12 +1,5 @@
 const {
-  Client,
-  GatewayIntentBits,
-  REST,
-  Routes,
-  SlashCommandBuilder,
-  PermissionFlagsBits,
-  Events,
-  MessageFlags
+  Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, Events, MessageFlags
 } = require('discord.js');
 
 class DiscordManager {
@@ -14,19 +7,17 @@ class DiscordManager {
     this.config = config;
     this.db = db;
     this.rustManager = null;
+    this.pairingManager = null;
     this.client = new Client({ intents: [GatewayIntentBits.Guilds] });
   }
 
-  setRustManager(manager) {
-    this.rustManager = manager;
-  }
+  setRustManager(manager) { this.rustManager = manager; }
+  setPairingManager(manager) { this.pairingManager = manager; }
 
   async start() {
     await this.#registerCommands();
-    this.client.on('interactionCreate', (interaction) => this.#onInteraction(interaction));
-    this.client.once(Events.ClientReady, () => {
-      console.log(`[Discord] logged in as ${this.client.user.tag}`);
-    });
+    this.client.on('interactionCreate', (i) => this.#onInteraction(i));
+    this.client.once(Events.ClientReady, () => console.log(`[Discord] logged in as ${this.client.user.tag}`));
     await this.client.login(this.config.discordToken);
   }
 
@@ -35,135 +26,122 @@ class DiscordManager {
       const guild = await this.client.guilds.fetch(this.config.discordGuildId);
       const member = await guild.members.fetch(discordId);
       return member.roles.cache.has(this.config.accessRoleId);
-    } catch (_) {
-      return false;
-    }
+    } catch (_) { return false; }
   }
+  isAdmin(id) { return this.config.adminDiscordIds.has(String(id)); }
 
-  isAdmin(discordId) {
-    return this.config.adminDiscordIds.has(discordId);
+  async notifyPairingComplete(discordId, result) {
+    try {
+      const user = await this.client.users.fetch(String(discordId));
+      await user.send(`✅ Rust+ połączone!\n**${result.name}** — \`${result.ip}:${result.port}\` — Steam \`${result.playerId}\`\nKonto zostało zapisane i bot próbuje się połączyć.`);
+    } catch (err) { console.warn('[Discord] pairing DM failed:', err?.message || err); }
   }
 
   async sendAlert(message) {
-    const channelId = this.config.discordAlertChannelId;
-    if (!channelId) return false;
+    if (!this.config.discordAlertChannelId) return false;
     try {
-      const channel = await this.client.channels.fetch(channelId);
+      const channel = await this.client.channels.fetch(this.config.discordAlertChannelId);
       if (!channel?.isTextBased()) return false;
       await channel.send(String(message).slice(0, 1900));
       return true;
-    } catch (err) {
-      console.error('[Discord] alert failed:', err?.message || err);
-      return false;
-    }
+    } catch (err) { console.error('[Discord] alert failed:', err?.message || err); return false; }
   }
 
   async #registerCommands() {
     const commands = [
-      new SlashCommandBuilder()
-        .setName('link')
-        .setDescription('Wygeneruj kod do połączenia Discord ↔ Steam.'),
-      new SlashCommandBuilder()
-        .setName('unlink')
-        .setDescription('Usuń swoje połączenie Discord ↔ Steam.'),
-      new SlashCommandBuilder()
-        .setName('mysteam')
-        .setDescription('Pokaż SteamID połączone z Twoim Discordem.'),
-      new SlashCommandBuilder()
-        .setName('rustaccount-add')
-        .setDescription('Dodaj konto/sesję Rust+ do bota.')
-        .addStringOption((o) => o.setName('id').setDescription('Krótki identyfikator, np. team-a').setRequired(true))
-        .addStringOption((o) => o.setName('name').setDescription('Nazwa serwera/konta').setRequired(true))
-        .addStringOption((o) => o.setName('ip').setDescription('IP lub hostname Companion Server').setRequired(true))
-        .addIntegerOption((o) => o.setName('port').setDescription('Rust+ app.port').setMinValue(1).setMaxValue(65535).setRequired(true))
-        .addStringOption((o) => o.setName('playerid').setDescription('SteamID64 konta Rust+').setRequired(true))
-        .addStringOption((o) => o.setName('playertoken').setDescription('playerToken z pairingu').setRequired(true)),
-      new SlashCommandBuilder()
-        .setName('rustaccount-remove')
-        .setDescription('Usuń konto/sesję Rust+ z bota.')
-        .addStringOption((o) => o.setName('id').setDescription('ID konta').setRequired(true)),
-      new SlashCommandBuilder()
-        .setName('rustaccount-list')
-        .setDescription('Pokaż skonfigurowane sesje Rust+ i ich status.')
-    ].map((command) => command.toJSON());
-
+      new SlashCommandBuilder().setName('pair').setDescription('Wygeneruj kod dla RustHelperPairing.exe.'),
+      new SlashCommandBuilder().setName('pair-status').setDescription('Sprawdź stan ostatniego pairingu Rust+.'),
+      new SlashCommandBuilder().setName('link').setDescription('Kod Discord ↔ Steam do komend w grze.'),
+      new SlashCommandBuilder().setName('unlink').setDescription('Usuń połączenie Discord ↔ Steam.'),
+      new SlashCommandBuilder().setName('mysteam').setDescription('Pokaż SteamID połączone z Discordem.'),
+      new SlashCommandBuilder().setName('rustaccounts').setDescription('Pokaż Twoje konta Rust+.'),
+      new SlashCommandBuilder().setName('rustaccount-remove').setDescription('Usuń swoje konto Rust+.').addStringOption(o=>o.setName('id').setDescription('ID konta z /rustaccounts').setRequired(true)),
+      new SlashCommandBuilder().setName('team-create').setDescription('Utwórz manualny team fallback.').addStringOption(o=>o.setName('name').setDescription('Nazwa teamu').setRequired(true)),
+      new SlashCommandBuilder().setName('team-assign').setDescription('Przypisz swoje konto Rust+ do manualnego teamu.')
+        .addStringOption(o=>o.setName('team').setDescription('ID teamu z /teams').setRequired(true))
+        .addStringOption(o=>o.setName('account').setDescription('ID konta z /rustaccounts').setRequired(true)),
+      new SlashCommandBuilder().setName('team-unassign').setDescription('Wypisz swoje konto z manualnego teamu.').addStringOption(o=>o.setName('account').setDescription('ID konta').setRequired(true)),
+      new SlashCommandBuilder().setName('team-remove').setDescription('Usuń swój manualny team.').addStringOption(o=>o.setName('team').setDescription('ID teamu').setRequired(true)),
+      new SlashCommandBuilder().setName('teams').setDescription('Pokaż manualne teamy i ACTIVE/BACKUP.')
+    ].map(c=>c.toJSON());
     const rest = new REST({ version: '10' }).setToken(this.config.discordToken);
-    await rest.put(
-      Routes.applicationGuildCommands(this.config.discordClientId, this.config.discordGuildId),
-      { body: commands }
-    );
+    await rest.put(Routes.applicationGuildCommands(this.config.discordClientId, this.config.discordGuildId), { body: commands });
     console.log('[Discord] slash commands registered');
   }
 
   async #onInteraction(interaction) {
     if (!interaction.isChatInputCommand()) return;
-
+    const uid = interaction.user.id;
+    const ephemeral = MessageFlags.Ephemeral;
     try {
+      if (interaction.commandName === 'pair') {
+        if (!(await this.hasAccessRole(uid))) return interaction.reply({ content:'⛔ Brak wymaganej roli Discord.', flags:ephemeral });
+        const t = this.pairingManager.createTicket(uid);
+        const mins = Math.max(1, Math.ceil((t.expiresAt-Date.now())/60000));
+        return interaction.reply({ content:`🔐 Kod pairingu: **${t.code}**\n1. Uruchom \`RustHelperPairing.exe\`\n2. Wklej ten kod\n3. W Rust kliknij **Pair with Server / Resend**\nKod ważny ~${mins} min.\n\nHasło Steam nie trafia do bota ani na Discord.`, flags:ephemeral });
+      }
+      if (interaction.commandName === 'pair-status') {
+        const s=this.pairingManager.status(uid);
+        if(s.phase==='idle') return interaction.reply({content:'Brak aktywnego pairingu. Użyj `/pair`.',flags:ephemeral});
+        if(s.phase==='paired') return interaction.reply({content:`✅ Sparowano: **${s.result?.name||'Rust server'}** — \`${s.result?.ip}:${s.result?.port}\``,flags:ephemeral});
+        return interaction.reply({content:`⏳ Czekam na EXE. Kod: **${s.code}**`,flags:ephemeral});
+      }
       if (interaction.commandName === 'link') {
-        const code = this.db.createLinkCode(interaction.user.id);
-        await interaction.reply({
-          content: `Twój kod: **${code}**\nW Rust team chacie wpisz: \`${this.config.prefix}link ${code}\`\nKod wygasa za 10 minut.`,
-          flags: MessageFlags.Ephemeral
-        });
-        return;
+        const code=this.db.createLinkCode(uid);
+        return interaction.reply({content:`Kod: **${code}**\nW Rust team chacie: \`${this.config.prefix}link ${code}\``,flags:ephemeral});
       }
-
       if (interaction.commandName === 'unlink') {
-        const removed = this.db.unlinkDiscord(interaction.user.id);
-        await interaction.reply({ content: removed ? '✅ Połączenie usunięte.' : 'Nie masz połączonego SteamID.', flags: MessageFlags.Ephemeral });
-        return;
+        const ok=this.db.unlinkDiscord(uid); return interaction.reply({content:ok?'✅ Połączenie usunięte.':'Brak połączonego SteamID.',flags:ephemeral});
       }
-
       if (interaction.commandName === 'mysteam') {
-        const steamId = this.db.getSteamIdByDiscordId(interaction.user.id);
-        await interaction.reply({ content: steamId ? `Połączone SteamID: \`${steamId}\`` : 'Brak połączonego SteamID.', flags: MessageFlags.Ephemeral });
-        return;
+        const id=this.db.getSteamIdByDiscordId(uid); return interaction.reply({content:id?`SteamID: \`${id}\``:'Brak połączonego SteamID.',flags:ephemeral});
       }
-
-      if (!this.isAdmin(interaction.user.id)) {
-        await interaction.reply({ content: '⛔ Ta komenda jest tylko dla administratorów bota.', flags: MessageFlags.Ephemeral });
-        return;
+      if (interaction.commandName === 'rustaccounts') {
+        const all=this.rustManager?.listStatus()||[];
+        const rows=all.filter(a=>this.isAdmin(uid)||this.db.getRustAccount(a.id)?.ownerDiscordId===uid);
+        const text=rows.length?rows.map(a=>`${a.connected?'🟢':'🔴'} \`${a.id}\` — ${a.name} — ${a.senderRole}${a.teamId?` — ${a.teamId}`:''}`).join('\n'):'Brak kont Rust+.';
+        return interaction.reply({content:text.slice(0,1900),flags:ephemeral});
       }
-
-      if (interaction.commandName === 'rustaccount-add') {
-        const tokenRaw = interaction.options.getString('playertoken', true).trim();
-        if (!/^-?\d+$/.test(tokenRaw)) throw new Error('playerToken musi być liczbą całkowitą.');
-
-        const account = this.db.upsertRustAccount({
-          id: interaction.options.getString('id', true).trim().toLowerCase(),
-          name: interaction.options.getString('name', true).trim(),
-          ip: interaction.options.getString('ip', true).trim(),
-          port: interaction.options.getInteger('port', true),
-          playerId: interaction.options.getString('playerid', true).trim(),
-          playerToken: Number(tokenRaw),
-          ownerDiscordId: interaction.user.id
-        });
-
-        this.rustManager?.start(account);
-        await interaction.reply({ content: `✅ Dodano Rust+ account \`${account.id}\`. Bot próbuje się połączyć.`, flags: MessageFlags.Ephemeral });
-        return;
-      }
-
       if (interaction.commandName === 'rustaccount-remove') {
-        const id = interaction.options.getString('id', true).trim().toLowerCase();
-        this.rustManager?.stop(id);
-        const removed = this.db.removeRustAccount(id);
-        await interaction.reply({ content: removed ? `✅ Usunięto \`${id}\`.` : `Nie znaleziono \`${id}\`.`, flags: MessageFlags.Ephemeral });
-        return;
+        const id=interaction.options.getString('id',true); const a=this.db.getRustAccount(id);
+        if(!a||(!this.isAdmin(uid)&&a.ownerDiscordId!==uid)) return interaction.reply({content:'⛔ Nie znaleziono konta lub brak dostępu.',flags:ephemeral});
+        this.rustManager?.stop(id); this.db.removeRustAccount(id); this.rustManager?.refreshRouting();
+        return interaction.reply({content:`✅ Usunięto \`${id}\`.`,flags:ephemeral});
       }
-
-      if (interaction.commandName === 'rustaccount-list') {
-        const rows = this.rustManager?.listStatus() || [];
-        const content = rows.length
-          ? rows.map((a) => `${a.connected ? '🟢' : '🔴'} \`${a.id}\` — ${a.name} — ${a.ip}:${a.port} — Steam ${a.playerId} — ${a.senderRole}${a.teamId ? ` (${a.teamId})` : ''}`).join('\n')
-          : 'Brak skonfigurowanych kont Rust+.';
-        await interaction.reply({ content: content.slice(0, 1900), flags: MessageFlags.Ephemeral });
+      if (interaction.commandName === 'team-create') {
+        if (!(await this.hasAccessRole(uid))) return interaction.reply({content:'⛔ Brak wymaganej roli.',flags:ephemeral});
+        const t=this.db.createManualTeam({name:interaction.options.getString('name',true),ownerDiscordId:uid}); this.rustManager?.refreshRouting();
+        return interaction.reply({content:`✅ Team utworzony: **${t.name}** — ID \`${t.id}\``,flags:ephemeral});
       }
-    } catch (err) {
-      console.error('[Discord] interaction error:', err);
-      const payload = { content: `❌ ${err.message || 'Wystąpił błąd.'}`, flags: MessageFlags.Ephemeral };
-      if (interaction.replied || interaction.deferred) await interaction.followUp(payload);
-      else await interaction.reply(payload);
+      if (interaction.commandName === 'team-assign') {
+        const tid=interaction.options.getString('team',true), aid=interaction.options.getString('account',true);
+        const t=this.db.getManualTeam(tid), a=this.db.getRustAccount(aid);
+        if(!t||!a||(!this.isAdmin(uid)&&(t.ownerDiscordId!==uid||a.ownerDiscordId!==uid))) return interaction.reply({content:'⛔ Team/konto nie istnieje albo brak dostępu.',flags:ephemeral});
+        this.db.assignAccountToManualTeam(tid,aid); this.rustManager?.refreshRouting();
+        return interaction.reply({content:`✅ \`${aid}\` przypisane do **${t.name}**.`,flags:ephemeral});
+      }
+      if (interaction.commandName === 'team-unassign') {
+        const aid=interaction.options.getString('account',true), a=this.db.getRustAccount(aid);
+        if(!a||(!this.isAdmin(uid)&&a.ownerDiscordId!==uid)) return interaction.reply({content:'⛔ Brak dostępu.',flags:ephemeral});
+        this.db.unassignAccountFromManualTeam(aid); this.rustManager?.refreshRouting();
+        return interaction.reply({content:`✅ Wypisano \`${aid}\` z manualnego teamu.`,flags:ephemeral});
+      }
+      if (interaction.commandName === 'team-remove') {
+        const tid=interaction.options.getString('team',true), t=this.db.getManualTeam(tid);
+        if(!t||(!this.isAdmin(uid)&&t.ownerDiscordId!==uid)) return interaction.reply({content:'⛔ Brak dostępu.',flags:ephemeral});
+        this.db.removeManualTeam(tid); this.rustManager?.refreshRouting();
+        return interaction.reply({content:`✅ Usunięto team **${t.name}**.`,flags:ephemeral});
+      }
+      if (interaction.commandName === 'teams') {
+        const teams=this.db.listManualTeams().filter(t=>this.isAdmin(uid)||t.ownerDiscordId===uid);
+        const statuses=new Map((this.rustManager?.listStatus()||[]).map(x=>[x.id,x]));
+        const out=teams.map(t=>{const accounts=(t.accountIds||[]).map(id=>{const s=statuses.get(id);return `${t.activeAccountId===id?'⭐ ACTIVE':'↪ BACKUP'} \`${id}\`${s?.connected?' 🟢':' 🔴'}`}).join('\n')||'— brak kont';return `**${t.name}** — \`${t.id}\`\n${accounts}`;}).join('\n\n')||'Brak manualnych teamów.';
+        return interaction.reply({content:out.slice(0,1900),flags:ephemeral});
+      }
+    } catch(err) {
+      console.error('[Discord] interaction error:',err);
+      const payload={content:`❌ ${err.message||'Wystąpił błąd.'}`,flags:ephemeral};
+      if(interaction.replied||interaction.deferred) await interaction.followUp(payload); else await interaction.reply(payload);
     }
   }
 }

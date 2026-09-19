@@ -8,12 +8,10 @@ function required(name) {
 function optional(name, fallback = '') { return process.env[name]?.trim() || fallback; }
 
 const baseUrl = optional('BASE_URL').replace(/\/$/, '');
-const discordClientSecret = optional('DISCORD_CLIENT_SECRET');
 
 module.exports = {
   discordToken: required('DISCORD_TOKEN'),
   discordClientId: required('DISCORD_CLIENT_ID'),
-  discordClientSecret,
   discordGuildId: required('DISCORD_GUILD_ID'),
   accessRoleId: required('DISCORD_ACCESS_ROLE_ID'),
   adminDiscordIds: new Set(optional('ADMIN_DISCORD_IDS').split(',').map((v) => v.trim()).filter(Boolean)),
@@ -25,8 +23,6 @@ module.exports = {
   eventAlertsEnabled: optional('EVENT_ALERTS_ENABLED', 'true').toLowerCase() !== 'false',
   discordAlertChannelId: optional('DISCORD_ALERT_CHANNEL_ID'),
   port: Number(optional('PORT', '3000')),
-  baseUrl,
-  sessionSecret: optional('SESSION_SECRET'),
-  encryptionKey: optional('ENCRYPTION_KEY'),
-  webEnabled: Boolean(baseUrl && discordClientSecret && optional('SESSION_SECRET'))
+  baseUrl: baseUrl || required('BASE_URL'),
+  encryptionKey: optional('ENCRYPTION_KEY')
 };

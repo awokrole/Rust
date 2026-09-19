@@ -56,10 +56,11 @@ function normalizePairingEvent(event) {
 }
 
 class PairingManager {
-  constructor({ db, rustManager, baseUrl }) {
+  constructor({ db, rustManager, baseUrl, onPaired = null }) {
     this.db = db;
     this.rustManager = rustManager;
     this.baseUrl = baseUrl;
+    this.onPaired = onPaired;
     this.tickets = new Map();
   }
 
@@ -119,6 +120,7 @@ class PairingManager {
     ticket.phase = 'paired';
     ticket.result = { accountId: account.id, name: account.name, ip: account.ip, port: account.port, playerId: account.playerId };
     ticket.expiresAt = Date.now() + 5 * 60_000;
+    if (this.onPaired) Promise.resolve(this.onPaired(ticket.discordId, ticket.result)).catch((err) => console.error('[Pairing] notify failed:', err?.message || err));
     return ticket.result;
   }
 }

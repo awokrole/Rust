@@ -37,6 +37,20 @@ class DiscordManager {
     } catch (err) { console.warn('[Discord] pairing DM failed:', err?.message || err); }
   }
 
+  async notifyDiagnostics(discordId, diag) {
+    try {
+      const user = await this.client.users.fetch(String(discordId));
+      const icon = (t) => t?.ok ? '✅' : '❌';
+      const err = (t) => t?.ok ? '' : ` — ${t?.error || 'error'}`;
+      const lines = ['🧪 **Rust+ diagnostics**', `Połączenie: ${diag.connected ? '✅' : '❌'}`];
+      for (const name of ['getInfo','getTime','getMapMarkers','getTeamInfo','getTeamChat']) {
+        const t = diag.tests?.[name];
+        lines.push(`${icon(t)} ${name}${err(t)}`);
+      }
+      await user.send(lines.join('\n').slice(0, 1900));
+    } catch (err) { console.warn('[Discord] diagnostics DM failed:', err?.message || err); }
+  }
+
   async sendAlert(message) {
     if (!this.config.discordAlertChannelId) return false;
     try {
@@ -55,6 +69,7 @@ class DiscordManager {
       new SlashCommandBuilder().setName('unlink').setDescription('Usuń połączenie Discord ↔ Steam.'),
       new SlashCommandBuilder().setName('mysteam').setDescription('Pokaż SteamID połączone z Discordem.'),
       new SlashCommandBuilder().setName('rustaccounts').setDescription('Pokaż Twoje konta Rust+.'),
+      new SlashCommandBuilder().setName('rustdiag').setDescription('Sprawdź które endpointy Rust+ działają.').addStringOption(o=>o.setName('account').setDescription('ID konta z /rustaccounts').setRequired(true)),
       new SlashCommandBuilder().setName('rustaccount-remove').setDescription('Usuń swoje konto Rust+.').addStringOption(o=>o.setName('id').setDescription('ID konta z /rustaccounts').setRequired(true)),
       new SlashCommandBuilder().setName('team-create').setDescription('Utwórz manualny team fallback.').addStringOption(o=>o.setName('name').setDescription('Nazwa teamu').setRequired(true)),
       new SlashCommandBuilder().setName('team-assign').setDescription('Przypisz swoje konto Rust+ do manualnego teamu.')
@@ -101,6 +116,16 @@ class DiscordManager {
         const rows=all.filter(a=>this.isAdmin(uid)||this.db.getRustAccount(a.id)?.ownerDiscordId===uid);
         const text=rows.length?rows.map(a=>`${a.connected?'🟢':'🔴'} \`${a.id}\` — ${a.name} — ${a.senderRole}${a.teamId?` — ${a.teamId}`:''}`).join('\n'):'Brak kont Rust+.';
         return interaction.reply({content:text.slice(0,1900),flags:ephemeral});
+      }
+      if (interaction.commandName === 'rustdiag') {
+        const id=interaction.options.getString('account',true); const a=this.db.getRustAccount(id);
+        if(!a||(!this.isAdmin(uid)&&a.ownerDiscordId!==uid)) return interaction.reply({content:'⛔ Nie znaleziono konta lub brak dostępu.',flags:ephemeral});
+        await interaction.deferReply({flags:ephemeral});
+        const d=await this.rustManager.diagnoseAccount(id);
+        const icon=(t)=>t?.ok?'✅':'❌'; const err=(t)=>t?.ok?'':` — ${t?.error||'error'}`;
+        const lines=[`🧪 **Rust+ diagnostics — ${a.name}**`,`Połączenie: ${d.connected?'✅':'❌'}`];
+        for(const n of ['getInfo','getTime','getMapMarkers','getTeamInfo','getTeamChat']) { const t=d.tests?.[n]; lines.push(`${icon(t)} ${n}${err(t)}`); }
+        return interaction.editReply({content:lines.join('\n').slice(0,1900)});
       }
       if (interaction.commandName === 'rustaccount-remove') {
         const id=interaction.options.getString('id',true); const a=this.db.getRustAccount(id);

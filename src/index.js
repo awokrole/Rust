@@ -25,7 +25,15 @@ async function main() {
     db,
     rustManager: rust,
     baseUrl: config.baseUrl,
-    onPaired: async (discordId, result) => discord.notifyPairingComplete(discordId, result)
+    onPaired: async (discordId, result) => {
+      await discord.notifyPairingComplete(discordId, result);
+      setTimeout(async () => {
+        try {
+          const diag = await rust.diagnoseAccount(result.accountId);
+          await discord.notifyDiagnostics(discordId, diag);
+        } catch (err) { console.warn('[Diagnostics] post-pair test failed:', err?.message || err); }
+      }, 4000);
+    }
   });
   discord.setRustManager(rust);
   discord.setPairingManager(pairing);

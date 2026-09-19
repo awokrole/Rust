@@ -96,6 +96,47 @@ class RustManager {
   restart(id) { const a = this.db.getRustAccount(id); if (!a) return false; this.start(a); return true; }
   refreshRouting() { this.#rebuildTeams(); return this.listTeams(); }
 
+  async diagnoseAccount(id) {
+    const session = this.sessions.get(String(id));
+    if (!session) throw new Error('Konto Rust+ nie jest uruchomione.');
+    if (!session.connected) return { accountId: String(id), connected: false, tests: {} };
+
+    const tests = {};
+    const run = async (name, fn) => {
+      const started = Date.now();
+      try {
+        const value = await fn();
+        tests[name] = { ok: true, ms: Date.now() - started, detail: value || null };
+      } catch (err) {
+        tests[name] = { ok: false, ms: Date.now() - started, error: this.#errorCode(err) || String(err?.message || err || 'unknown') };
+      }
+    };
+
+    await run('getInfo', async () => {
+      const r = await session.rust.sendRequestAsync({ getInfo: {} }, 5000);
+      return r?.info ? { name: r.info.name || '', players: r.info.players ?? null } : null;
+    });
+    await run('getTime', async () => {
+      const r = await session.rust.sendRequestAsync({ getTime: {} }, 5000);
+      return r?.time ? { time: r.time.time } : null;
+    });
+    await run('getMapMarkers', async () => {
+      const r = await session.rust.sendRequestAsync({ getMapMarkers: {} }, 5000);
+      return { markers: r?.mapMarkers?.markers?.length || 0 };
+    });
+    await run('getTeamInfo', async () => {
+      const r = await session.rust.sendRequestAsync({ getTeamInfo: {} }, 5000);
+      return { members: r?.teamInfo?.members?.length || 0 };
+    });
+    await run('getTeamChat', async () => {
+      const r = await session.rust.sendRequestAsync({ getTeamChat: {} }, 5000);
+      return { messages: r?.teamChat?.messages?.length || 0 };
+    });
+
+    console.log(`[Rust+] diagnostics ${session.account.id}: ${JSON.stringify(tests)}`);
+    return { accountId: session.account.id, connected: true, server: `${session.account.ip}:${session.account.port}`, tests };
+  }
+
   listStatus() {
     return this.db.listRustAccounts().map((account) => {
       const s = this.sessions.get(account.id);

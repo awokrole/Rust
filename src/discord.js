@@ -1,5 +1,6 @@
 const {
-  Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, Events, MessageFlags
+  Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, Events, MessageFlags,
+  EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle
 } = require('discord.js');
 
 class DiscordManager {
@@ -62,6 +63,75 @@ class DiscordManager {
     } catch (err) { console.error('[Discord] alert failed:', err?.message || err); return false; }
   }
 
+
+  #ownedRustAccounts(uid) {
+    return (this.rustManager?.listStatus() || []).filter((a) => this.isAdmin(uid) || this.db.getRustAccount(a.id)?.ownerDiscordId === String(uid));
+  }
+
+  #ownedSmartGroups(uid) {
+    return this.db.listSmartGroups().filter((g) => this.isAdmin(uid) || g.ownerDiscordId === String(uid));
+  }
+
+  #ownedSmartDevices(uid) {
+    return this.db.listSmartDevices().filter((d) => this.isAdmin(uid) || d.ownerDiscordId === String(uid));
+  }
+
+  async #renderSmartPanel(group) {
+    const statuses = await this.rustManager.getSmartGroupStatus(group);
+    const account = this.db.getRustAccount(group.accountId);
+    const on = statuses.filter((x) => x.ok && x.value).length;
+    const off = statuses.filter((x) => x.ok && !x.value).length;
+    const errors = statuses.filter((x) => !x.ok).length;
+    const description = statuses.length
+      ? statuses.map((x) => x.ok ? `${x.value ? '🟢' : '⚫'} **${x.device.name}** — ${x.value ? 'ON' : 'OFF'}` : `🔴 **${x.device.name}** — ${x.error || 'offline'}`).join('\n')
+      : 'Brak urządzeń w tej grupie.';
+    const embed = new EmbedBuilder()
+      .setTitle(`🎛️ ${group.name}`)
+      .setDescription(description.slice(0, 3900))
+      .addFields(
+        { name: 'Serwer / konto Rust+', value: account?.name || group.accountId, inline: false },
+        { name: 'Status', value: `🟢 ON: **${on}**   ⚫ OFF: **${off}**   🔴 Błąd: **${errors}**`, inline: false }
+      )
+      .setFooter({ text: 'Rust Helper • Smart Device Panel' })
+      .setTimestamp();
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`smart:on:${group.id}`).setLabel('Włącz').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`smart:off:${group.id}`).setLabel('Wyłącz').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`smart:refresh:${group.id}`).setLabel('Odśwież').setStyle(ButtonStyle.Secondary)
+    );
+    return { embeds: [embed], components: [row] };
+  }
+
+  async #handleSmartButton(interaction) {
+    const parts = String(interaction.customId || '').split(':');
+    if (parts.length !== 3 || parts[0] !== 'smart') return false;
+    const [, action, groupId] = parts;
+    const group = this.db.getSmartGroup(groupId);
+    if (!group) {
+      await interaction.reply({ content: '❌ Ta grupa już nie istnieje.', flags: MessageFlags.Ephemeral });
+      return true;
+    }
+    if (!(await this.hasAccessRole(interaction.user.id)) && !this.isAdmin(interaction.user.id)) {
+      await interaction.reply({ content: '⛔ Brak wymaganej roli Discord.', flags: MessageFlags.Ephemeral });
+      return true;
+    }
+    await interaction.deferUpdate();
+    try {
+      if (action === 'on' || action === 'off') {
+        const value = action === 'on';
+        const results = await this.rustManager.setSmartGroupValue(group, value);
+        const failed = results.filter((x) => !x.ok);
+        if (failed.length) console.warn(`[Smart] ${group.id} ${action}: ${failed.length}/${results.length} failed`);
+      }
+      const panel = await this.#renderSmartPanel(group);
+      await interaction.editReply(panel);
+    } catch (err) {
+      console.error('[Smart] button failed:', err);
+      try { await interaction.followUp({ content: `❌ ${err.message || err}`, flags: MessageFlags.Ephemeral }); } catch (_) {}
+    }
+    return true;
+  }
+
   async #registerCommands() {
     const commands = [
       new SlashCommandBuilder().setName('pair').setDescription('Rozpocznij pairing Rust+ krok po kroku.'),
@@ -83,6 +153,27 @@ class DiscordManager {
         .addStringOption(o=>o.setName('item').setDescription('Item, np. rocket, c4, satchel').setRequired(true).setAutocomplete(true))
         .addIntegerOption(o=>o.setName('amount').setDescription('Ilość do zrobienia').setRequired(true).setMinValue(1).setMaxValue(1000000)),
       new SlashCommandBuilder().setName('items-refresh').setDescription('Odśwież listę itemów z Rust Items API (admin).'),
+      new SlashCommandBuilder().setName('device-group-create').setDescription('Utwórz grupę Smart Switchy (np. Turrety).')
+        .addStringOption(o=>o.setName('name').setDescription('Nazwa grupy, np. Turrety').setRequired(true))
+        .addStringOption(o=>o.setName('account').setDescription('Konto Rust+').setRequired(true).setAutocomplete(true)),
+      new SlashCommandBuilder().setName('device-add').setDescription('Dodaj sparowany Smart Switch do bota.')
+        .addStringOption(o=>o.setName('name').setDescription('Nazwa, np. Turrety dach').setRequired(true))
+        .addStringOption(o=>o.setName('account').setDescription('Konto Rust+').setRequired(true).setAutocomplete(true))
+        .addStringOption(o=>o.setName('entity').setDescription('Entity ID Smart Switcha').setRequired(true))
+        .addStringOption(o=>o.setName('group').setDescription('Grupa urządzeń (opcjonalnie)').setRequired(false).setAutocomplete(true)),
+      new SlashCommandBuilder().setName('device-group-assign').setDescription('Przypisz urządzenie do grupy.')
+        .addStringOption(o=>o.setName('device').setDescription('Urządzenie').setRequired(true).setAutocomplete(true))
+        .addStringOption(o=>o.setName('group').setDescription('Grupa').setRequired(true).setAutocomplete(true)),
+      new SlashCommandBuilder().setName('device-remove').setDescription('Usuń Smart Switch z bota.')
+        .addStringOption(o=>o.setName('device').setDescription('Urządzenie').setRequired(true).setAutocomplete(true)),
+      new SlashCommandBuilder().setName('device-group-remove').setDescription('Usuń grupę Smart Switchy.')
+        .addStringOption(o=>o.setName('group').setDescription('Grupa').setRequired(true).setAutocomplete(true)),
+      new SlashCommandBuilder().setName('devices').setDescription('Pokaż zapisane Smart Switche i ich grupy.'),
+      new SlashCommandBuilder().setName('device-groups').setDescription('Pokaż grupy Smart Switchy.'),
+      new SlashCommandBuilder().setName('device-status').setDescription('Sprawdź stan Smart Switcha.')
+        .addStringOption(o=>o.setName('device').setDescription('Urządzenie').setRequired(true).setAutocomplete(true)),
+      new SlashCommandBuilder().setName('device-panel').setDescription('Wyślij panel ON/OFF/STATUS na Discord.')
+        .addStringOption(o=>o.setName('group').setDescription('Grupa do sterowania').setRequired(true).setAutocomplete(true)),
       new SlashCommandBuilder().setName('teams').setDescription('Pokaż manualne teamy i ACTIVE/BACKUP.')
     ].map(c=>c.toJSON());
     const rest = new REST({ version: '10' }).setToken(this.config.discordToken);
@@ -98,9 +189,28 @@ class DiscordManager {
           const choices = this.rustClash.searchItems(q, 25).map(x => ({ name: x.name.slice(0,100), value: x.slug.slice(0,100) }));
           return interaction.respond(choices);
         }
+        const uid = interaction.user.id;
+        const focused = interaction.options.getFocused(true);
+        const query = String(focused.value || '').toLowerCase();
+        if (focused.name === 'account' && ['device-add','device-group-create'].includes(interaction.commandName)) {
+          const choices = this.#ownedRustAccounts(uid).filter(a => `${a.name} ${a.id}`.toLowerCase().includes(query)).slice(0,25)
+            .map(a => ({ name: `${a.connected?'🟢':'🔴'} ${a.name}`.slice(0,100), value: a.id.slice(0,100) }));
+          return interaction.respond(choices);
+        }
+        if (focused.name === 'group' && ['device-add','device-group-assign','device-group-remove','device-panel'].includes(interaction.commandName)) {
+          const choices = this.#ownedSmartGroups(uid).filter(g => `${g.name} ${g.id}`.toLowerCase().includes(query)).slice(0,25)
+            .map(g => ({ name: g.name.slice(0,100), value: g.id.slice(0,100) }));
+          return interaction.respond(choices);
+        }
+        if (focused.name === 'device' && ['device-group-assign','device-remove','device-status'].includes(interaction.commandName)) {
+          const choices = this.#ownedSmartDevices(uid).filter(d => `${d.name} ${d.entityId} ${d.id}`.toLowerCase().includes(query)).slice(0,25)
+            .map(d => ({ name: `${d.name} (${d.entityId})`.slice(0,100), value: d.id.slice(0,100) }));
+          return interaction.respond(choices);
+        }
       } catch (_) { try { await interaction.respond([]); } catch (_) {} }
       return;
     }
+    if (interaction.isButton()) { await this.#handleSmartButton(interaction); return; }
     if (!interaction.isChatInputCommand()) return;
     const uid = interaction.user.id;
     const ephemeral = MessageFlags.Ephemeral;
@@ -226,6 +336,74 @@ class DiscordManager {
         } catch (err) {
           return interaction.editReply({content:`❌ Items API refresh: ${err.message || err}`});
         }
+      }
+
+      if (interaction.commandName === 'device-group-create') {
+        if (!(await this.hasAccessRole(uid)) && !this.isAdmin(uid)) return interaction.reply({content:'⛔ Brak wymaganej roli Discord.',flags:ephemeral});
+        const accountId=interaction.options.getString('account',true), account=this.db.getRustAccount(accountId);
+        if(!account||(!this.isAdmin(uid)&&account.ownerDiscordId!==uid)) return interaction.reply({content:'⛔ Konto Rust+ nie istnieje albo brak dostępu.',flags:ephemeral});
+        const group=this.db.createSmartGroup({name:interaction.options.getString('name',true),ownerDiscordId:uid,accountId});
+        return interaction.reply({content:`✅ Utworzono grupę **${group.name}** — \`${group.id}\`.`,flags:ephemeral});
+      }
+      if (interaction.commandName === 'device-add') {
+        if (!(await this.hasAccessRole(uid)) && !this.isAdmin(uid)) return interaction.reply({content:'⛔ Brak wymaganej roli Discord.',flags:ephemeral});
+        const accountId=interaction.options.getString('account',true), account=this.db.getRustAccount(accountId);
+        if(!account||(!this.isAdmin(uid)&&account.ownerDiscordId!==uid)) return interaction.reply({content:'⛔ Konto Rust+ nie istnieje albo brak dostępu.',flags:ephemeral});
+        const groupId=interaction.options.getString('group',false);
+        if(groupId){const g=this.db.getSmartGroup(groupId);if(!g||(!this.isAdmin(uid)&&g.ownerDiscordId!==uid)) return interaction.reply({content:'⛔ Grupa nie istnieje albo brak dostępu.',flags:ephemeral});}
+        const device=this.db.addSmartDevice({name:interaction.options.getString('name',true),ownerDiscordId:uid,accountId,entityId:interaction.options.getString('entity',true),groupId});
+        await interaction.deferReply({flags:ephemeral});
+        try {
+          const info=await this.rustManager.getSmartDeviceInfo(device.accountId,device.entityId);
+          return interaction.editReply({content:`✅ Dodano **${device.name}** (Entity \`${device.entityId}\`) — stan: **${info.value?'ON':'OFF'}**${groupId?' — przypisano do grupy.':''}`});
+        } catch(err) {
+          return interaction.editReply({content:`⚠️ Urządzenie zapisane, ale Rust+ nie odczytał stanu: ${err.message||err}\nSprawdź Entity ID i czy Smart Switch jest sparowany z tym samym kontem Rust+.`});
+        }
+      }
+      if (interaction.commandName === 'device-group-assign') {
+        const deviceId=interaction.options.getString('device',true), groupId=interaction.options.getString('group',true);
+        const d=this.db.getSmartDevice(deviceId), g=this.db.getSmartGroup(groupId);
+        if(!d||!g||(!this.isAdmin(uid)&&(d.ownerDiscordId!==uid||g.ownerDiscordId!==uid))) return interaction.reply({content:'⛔ Urządzenie/grupa nie istnieje albo brak dostępu.',flags:ephemeral});
+        this.db.assignSmartDeviceToGroup(deviceId,groupId);
+        return interaction.reply({content:`✅ **${d.name}** przypisane do **${g.name}**.`,flags:ephemeral});
+      }
+      if (interaction.commandName === 'device-remove') {
+        const id=interaction.options.getString('device',true), d=this.db.getSmartDevice(id);
+        if(!d||(!this.isAdmin(uid)&&d.ownerDiscordId!==uid)) return interaction.reply({content:'⛔ Urządzenie nie istnieje albo brak dostępu.',flags:ephemeral});
+        this.db.removeSmartDevice(id);
+        return interaction.reply({content:`✅ Usunięto **${d.name}**.`,flags:ephemeral});
+      }
+      if (interaction.commandName === 'device-group-remove') {
+        const id=interaction.options.getString('group',true), g=this.db.getSmartGroup(id);
+        if(!g||(!this.isAdmin(uid)&&g.ownerDiscordId!==uid)) return interaction.reply({content:'⛔ Grupa nie istnieje albo brak dostępu.',flags:ephemeral});
+        this.db.removeSmartGroup(id);
+        return interaction.reply({content:`✅ Usunięto grupę **${g.name}**. Urządzenia pozostały zapisane.`,flags:ephemeral});
+      }
+      if (interaction.commandName === 'devices') {
+        const rows=this.#ownedSmartDevices(uid);
+        const groups=new Map(this.db.listSmartGroups().map(g=>[g.id,g]));
+        const text=rows.length?rows.map(d=>`• **${d.name}** — Entity \`${d.entityId}\` — ${groups.get(d.groupId)?.name||'bez grupy'} — konto \`${d.accountId}\``).join('\n'):'Brak zapisanych Smart Switchy.';
+        return interaction.reply({content:text.slice(0,1900),flags:ephemeral});
+      }
+      if (interaction.commandName === 'device-groups') {
+        const groups=this.#ownedSmartGroups(uid);
+        const text=groups.length?groups.map(g=>`• **${g.name}** — \`${g.id}\` — urządzeń: **${(g.deviceIds||[]).length}** — konto \`${g.accountId}\``).join('\n'):'Brak grup Smart Switchy.';
+        return interaction.reply({content:text.slice(0,1900),flags:ephemeral});
+      }
+      if (interaction.commandName === 'device-status') {
+        const id=interaction.options.getString('device',true), d=this.db.getSmartDevice(id);
+        if(!d||(!this.isAdmin(uid)&&d.ownerDiscordId!==uid)) return interaction.reply({content:'⛔ Urządzenie nie istnieje albo brak dostępu.',flags:ephemeral});
+        await interaction.deferReply({flags:ephemeral});
+        const info=await this.rustManager.getSmartDeviceInfo(d.accountId,d.entityId);
+        return interaction.editReply({content:`${info.value?'🟢':'⚫'} **${d.name}** — **${info.value?'ON':'OFF'}** — Entity \`${d.entityId}\``});
+      }
+      if (interaction.commandName === 'device-panel') {
+        const id=interaction.options.getString('group',true), g=this.db.getSmartGroup(id);
+        if(!g||(!this.isAdmin(uid)&&g.ownerDiscordId!==uid)) return interaction.reply({content:'⛔ Grupa nie istnieje albo brak dostępu.',flags:ephemeral});
+        if(!(g.deviceIds||[]).length) return interaction.reply({content:'❌ Ta grupa nie ma jeszcze żadnych urządzeń.',flags:ephemeral});
+        await interaction.deferReply();
+        const panel=await this.#renderSmartPanel(g);
+        return interaction.editReply(panel);
       }
       if (interaction.commandName === 'teams') {
         const teams=this.db.listManualTeams().filter(t=>this.isAdmin(uid)||t.ownerDiscordId===uid);

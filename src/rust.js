@@ -22,6 +22,7 @@ class RustManager {
     this.sessions = new Map();
     this.teamContexts = new Map();
     this.nextTeamId = 1;
+    this.smartDeviceStates = new Map();
   }
 
   startAll() { for (const account of this.db.listRustAccounts()) this.start(account); }
@@ -65,6 +66,11 @@ class RustManager {
     rust.on('message', (message) => {
       const teamMessage = message?.broadcast?.teamMessage?.message;
       if (teamMessage) { session.chatStatus = 'AVAILABLE'; session.chatError = null; this.#onTeamMessage(session, teamMessage).catch(console.error); }
+      const changed = message?.broadcast?.entityChanged;
+      if (changed?.entityId != null && changed?.payload) {
+        const key = `${account.id}:${String(changed.entityId)}`;
+        this.smartDeviceStates.set(key, { value: Boolean(changed.payload.value), at: Date.now() });
+      }
     });
 
     rust.on('disconnected', () => {
@@ -101,6 +107,63 @@ class RustManager {
 
   restart(id) { const a = this.db.getRustAccount(id); if (!a) return false; this.start(a); return true; }
   refreshRouting() { this.#rebuildTeams(); return this.listTeams(); }
+
+
+  #smartSession(accountId) {
+    const session = this.sessions.get(String(accountId));
+    if (!session) throw new Error('Konto Rust+ nie jest uruchomione.');
+    if (!session.connected) throw new Error('Konto Rust+ jest offline.');
+    return session;
+  }
+
+  async getSmartDeviceInfo(accountId, entityId) {
+    const session = this.#smartSession(accountId);
+    const id = Number(entityId);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Nieprawidłowe Entity ID.');
+    const response = await session.rust.sendRequestAsync({ entityId: id, getEntityInfo: {} }, 5000);
+    const payload = response?.entityInfo?.payload;
+    if (!payload) throw new Error('Rust+ nie zwrócił informacji o urządzeniu.');
+    const value = Boolean(payload.value);
+    this.smartDeviceStates.set(`${String(accountId)}:${id}`, { value, at: Date.now() });
+    return { entityId: id, value, payload };
+  }
+
+  async setSmartDeviceValue(accountId, entityId, value) {
+    const session = this.#smartSession(accountId);
+    const id = Number(entityId);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Nieprawidłowe Entity ID.');
+    await session.rust.sendRequestAsync({ entityId: id, setEntityValue: { value: Boolean(value) } }, 5000);
+    this.smartDeviceStates.set(`${String(accountId)}:${id}`, { value: Boolean(value), at: Date.now() });
+    return this.getSmartDeviceInfo(accountId, id);
+  }
+
+  async getSmartGroupStatus(group) {
+    const devices = (group?.deviceIds || []).map((id) => this.db.getSmartDevice(id)).filter(Boolean);
+    const rows = [];
+    for (const device of devices) {
+      try {
+        const info = await this.getSmartDeviceInfo(device.accountId, device.entityId);
+        rows.push({ device, ok: true, value: info.value });
+      } catch (err) {
+        rows.push({ device, ok: false, error: this.#errorCode(err) || String(err?.message || err || 'error') });
+      }
+    }
+    return rows;
+  }
+
+  async setSmartGroupValue(group, value) {
+    const devices = (group?.deviceIds || []).map((id) => this.db.getSmartDevice(id)).filter(Boolean);
+    const results = [];
+    for (const device of devices) {
+      try {
+        const info = await this.setSmartDeviceValue(device.accountId, device.entityId, value);
+        results.push({ device, ok: true, value: info.value });
+      } catch (err) {
+        results.push({ device, ok: false, error: this.#errorCode(err) || String(err?.message || err || 'error') });
+      }
+    }
+    return results;
+  }
 
   async diagnoseAccount(id) {
     const session = this.sessions.get(String(id));

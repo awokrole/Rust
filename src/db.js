@@ -10,12 +10,12 @@ class JsonDb {
     this.data = this.#load();
   }
 
-  #blank() { return { version: 4, links: {}, pendingLinks: {}, rustAccounts: {}, rustAuth: {}, manualTeams: {} }; }
+  #blank() { return { version: 5, links: {}, pendingLinks: {}, rustAccounts: {}, rustAuth: {}, manualTeams: {}, smartDevices: {}, smartGroups: {} }; }
 
   #load() {
     if (!fs.existsSync(this.file)) return this.#blank();
     const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-    return { ...this.#blank(), ...parsed, version: 4, rustAuth: parsed.rustAuth || {}, manualTeams: parsed.manualTeams || {} };
+    return { ...this.#blank(), ...parsed, version: 5, rustAuth: parsed.rustAuth || {}, manualTeams: parsed.manualTeams || {}, smartDevices: parsed.smartDevices || {}, smartGroups: parsed.smartGroups || {} };
   }
 
   save() {
@@ -111,6 +111,13 @@ class JsonDb {
       team.accountIds = (team.accountIds || []).filter((x) => x !== id);
       if (team.activeAccountId === id) team.activeAccountId = null;
     }
+    for (const [deviceId, device] of Object.entries(this.data.smartDevices)) {
+      if (device.accountId === id) delete this.data.smartDevices[deviceId];
+    }
+    for (const [groupId, group] of Object.entries(this.data.smartGroups)) {
+      group.deviceIds = (group.deviceIds || []).filter((deviceId) => this.data.smartDevices[deviceId]);
+      if (group.accountId === id || group.deviceIds.length === 0) delete this.data.smartGroups[groupId];
+    }
     this.save();
     return true;
   }
@@ -172,6 +179,124 @@ class JsonDb {
     if (team.activeAccountId === (accountId || null)) return true;
     team.activeAccountId = accountId || null;
     team.updatedAt = new Date().toISOString();
+    this.save();
+    return true;
+  }
+
+
+  createSmartGroup({ name, ownerDiscordId, accountId }) {
+    if (!this.data.rustAccounts[accountId]) throw new Error('Nie znaleziono konta Rust+.');
+    const id = `sg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    this.data.smartGroups[id] = {
+      id,
+      name: String(name || 'Smart Group').trim().slice(0, 80) || 'Smart Group',
+      ownerDiscordId: String(ownerDiscordId || ''),
+      accountId: String(accountId),
+      deviceIds: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    this.save();
+    return this.getSmartGroup(id);
+  }
+
+  listSmartGroups() {
+    return Object.values(this.data.smartGroups).map((g) => ({ ...g, deviceIds: [...(g.deviceIds || [])] }));
+  }
+  getSmartGroup(id) {
+    const g = this.data.smartGroups[String(id)];
+    return g ? { ...g, deviceIds: [...(g.deviceIds || [])] } : null;
+  }
+  removeSmartGroup(id) {
+    const group = this.data.smartGroups[String(id)];
+    if (!group) return false;
+    for (const deviceId of group.deviceIds || []) {
+      const d = this.data.smartDevices[deviceId];
+      if (d) d.groupId = null;
+    }
+    delete this.data.smartGroups[String(id)];
+    this.save();
+    return true;
+  }
+
+  addSmartDevice({ name, ownerDiscordId, accountId, entityId, groupId = null }) {
+    if (!this.data.rustAccounts[accountId]) throw new Error('Nie znaleziono konta Rust+.');
+    const entity = String(entityId || '').trim();
+    if (!/^\d+$/.test(entity)) throw new Error('Entity ID musi być liczbą.');
+    const entityNumber = Number(entity);
+    if (!Number.isSafeInteger(entityNumber) || entityNumber <= 0) throw new Error('Nieprawidłowe Entity ID.');
+    if (groupId) {
+      const group = this.data.smartGroups[groupId];
+      if (!group) throw new Error('Nie znaleziono grupy.');
+      if (group.accountId !== String(accountId)) throw new Error('Grupa używa innego konta Rust+.');
+    }
+    for (const d of Object.values(this.data.smartDevices)) {
+      if (d.accountId === String(accountId) && d.entityId === entity) throw new Error('To urządzenie jest już dodane do tego konta Rust+.');
+    }
+    const id = `dev-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    this.data.smartDevices[id] = {
+      id,
+      name: String(name || `Smart Switch ${entity}`).trim().slice(0, 80) || `Smart Switch ${entity}`,
+      ownerDiscordId: String(ownerDiscordId || ''),
+      accountId: String(accountId),
+      entityId: entity,
+      groupId: groupId || null,
+      type: 'smart-switch',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    if (groupId) {
+      const group = this.data.smartGroups[groupId];
+      if (!group.deviceIds.includes(id)) group.deviceIds.push(id);
+      group.updatedAt = new Date().toISOString();
+    }
+    this.save();
+    return this.getSmartDevice(id);
+  }
+
+  listSmartDevices() { return Object.values(this.data.smartDevices).map((d) => ({ ...d })); }
+  getSmartDevice(id) { const d = this.data.smartDevices[String(id)]; return d ? { ...d } : null; }
+  removeSmartDevice(id) {
+    const device = this.data.smartDevices[String(id)];
+    if (!device) return false;
+    if (device.groupId && this.data.smartGroups[device.groupId]) {
+      const group = this.data.smartGroups[device.groupId];
+      group.deviceIds = (group.deviceIds || []).filter((x) => x !== String(id));
+      group.updatedAt = new Date().toISOString();
+    }
+    delete this.data.smartDevices[String(id)];
+    this.save();
+    return true;
+  }
+
+  assignSmartDeviceToGroup(deviceId, groupId) {
+    const device = this.data.smartDevices[String(deviceId)];
+    const group = this.data.smartGroups[String(groupId)];
+    if (!device || !group) throw new Error('Nie znaleziono urządzenia lub grupy.');
+    if (device.accountId !== group.accountId) throw new Error('Urządzenie i grupa muszą używać tego samego konta Rust+.');
+    if (device.groupId && this.data.smartGroups[device.groupId]) {
+      const old = this.data.smartGroups[device.groupId];
+      old.deviceIds = (old.deviceIds || []).filter((x) => x !== device.id);
+      old.updatedAt = new Date().toISOString();
+    }
+    device.groupId = group.id;
+    device.updatedAt = new Date().toISOString();
+    if (!group.deviceIds.includes(device.id)) group.deviceIds.push(device.id);
+    group.updatedAt = new Date().toISOString();
+    this.save();
+    return this.getSmartDevice(device.id);
+  }
+
+  unassignSmartDevice(deviceId) {
+    const device = this.data.smartDevices[String(deviceId)];
+    if (!device) return false;
+    if (device.groupId && this.data.smartGroups[device.groupId]) {
+      const group = this.data.smartGroups[device.groupId];
+      group.deviceIds = (group.deviceIds || []).filter((x) => x !== device.id);
+      group.updatedAt = new Date().toISOString();
+    }
+    device.groupId = null;
+    device.updatedAt = new Date().toISOString();
     this.save();
     return true;
   }

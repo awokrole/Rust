@@ -28,7 +28,9 @@ async function getEvents(rust) {
   return `🚢 Cargo ${s(MARKER.CARGO)} | 🚁 Heli ${s(MARKER.PATROL_HELI)} | 🚁 CH47 ${s(MARKER.CH47)} | 📦 Crate ${s(MARKER.CRATE)}`;
 }
 async function getTeam(rust, onlineOnly = false) {
-  const r = await requestAsync(rust, { getTeamInfo: {} });
+  let r;
+  try { r = await requestAsync(rust, { getTeamInfo: {} }); }
+  catch (err) { if (String(err?.error || err?.message || err).toLowerCase().includes('not_found')) return '👥 Team info niedostępne na tym serwerze.'; throw err; }
   const members = r?.teamInfo?.members || [];
   const filtered = onlineOnly ? members.filter((m) => m.isOnline) : members;
   if (!filtered.length) return onlineOnly ? '👥 Nikt z teamu nie jest teraz online.' : '👥 Brak danych teamu.';
@@ -36,13 +38,17 @@ async function getTeam(rust, onlineOnly = false) {
   return `${onlineOnly ? '🟢 Online' : '👥 Team'} (${filtered.length}${onlineOnly ? `/${members.length}` : ''}): ${names}`.slice(0, 490);
 }
 async function getStatus(rust) {
-  const [time, markers, team] = await Promise.all([
-    requestAsync(rust, { getTime: {} }), requestAsync(rust, { getMapMarkers: {} }), requestAsync(rust, { getTeamInfo: {} })
+  const [time, markers] = await Promise.all([
+    requestAsync(rust, { getTime: {} }), requestAsync(rust, { getMapMarkers: {} })
   ]);
   const m = markers?.mapMarkers?.markers || [];
-  const online = (team?.teamInfo?.members || []).filter((x) => x.isOnline).length;
-  const total = (team?.teamInfo?.members || []).length;
-  return `🕒 ${formatGameTime(time?.time?.time)} | 🚢 ${hasType(m, MARKER.CARGO) ? '✅' : '❌'} | 🚁 ${hasType(m, MARKER.PATROL_HELI) ? '✅' : '❌'} | 📦 ${hasType(m, MARKER.CRATE) ? '✅' : '❌'} | 👥 ${online}/${total}`;
+  let teamText = '👥 n/d';
+  try {
+    const team = await requestAsync(rust, { getTeamInfo: {} });
+    const members = team?.teamInfo?.members || [];
+    teamText = `👥 ${members.filter((x) => x.isOnline).length}/${members.length}`;
+  } catch (_) {}
+  return `🕒 ${formatGameTime(time?.time?.time)} | 🚢 ${hasType(m, MARKER.CARGO) ? '✅' : '❌'} | 🚁 ${hasType(m, MARKER.PATROL_HELI) ? '✅' : '❌'} | 📦 ${hasType(m, MARKER.CRATE) ? '✅' : '❌'} | ${teamText}`;
 }
 async function getServer(rust) {
   const r = await requestAsync(rust, { getInfo: {} });

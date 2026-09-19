@@ -31,7 +31,7 @@ class WebPanel {
     }
     this.app.use(express.urlencoded({ extended: false }));
     this.app.use(express.json({ limit: '128kb' }));
-    this.app.get('/health', (_, res) => res.json({ ok: true, version: '0.4.2' }));
+    this.app.get('/health', (_, res) => res.json({ ok: true, version: '0.4.3' }));
     this.app.get('/', (req, res) => this.#home(req, res));
     this.app.get('/auth/discord', (req, res) => this.#login(req, res));
     this.app.get('/auth/discord/callback', (req, res) => this.#callback(req, res));
@@ -45,6 +45,10 @@ class WebPanel {
 
     this.app.post('/account/add', (req, res) => this.#addAccount(req, res));
     this.app.post('/account/remove', (req, res) => this.#removeAccount(req, res));
+    this.app.post('/team/create', (req, res) => this.#createTeam(req, res));
+    this.app.post('/team/assign', (req, res) => this.#assignTeam(req, res));
+    this.app.post('/team/unassign', (req, res) => this.#unassignTeam(req, res));
+    this.app.post('/team/remove', (req, res) => this.#removeTeam(req, res));
     this.server = this.app.listen(this.config.port, '0.0.0.0', () => console.log(`[Web] listening on :${this.config.port}`));
     return this.server;
   }
@@ -86,9 +90,28 @@ class WebPanel {
       const teamLabel = a.teamStatus === 'TEAM_OK' ? (a.teamId || 'TEAM OK') : a.teamStatus === 'NO_TEAM' ? 'NO TEAM' : a.teamStatus === 'TEAM_API_ERROR' ? 'TEAM API ERROR' : a.teamStatus === 'CHECKING' ? 'CHECKING TEAM' : 'UNASSIGNED';
       const teamClass = a.teamStatus === 'TEAM_OK' ? 'ok' : a.teamStatus === 'NO_TEAM' ? 'warn' : a.teamStatus === 'TEAM_API_ERROR' ? 'bad' : '';
       const detail = a.teamStatus === 'TEAM_API_ERROR' && a.teamError ? ` · błąd: ${esc(a.teamError)}` : '';
-      return `<div class="card"><div class="row"><strong>${esc(a.name)}</strong><span class="pill ${a.connected?'ok':'bad'}">${a.connected?'CONNECTED':'OFFLINE'}</span><span class="pill ${teamClass}">${esc(teamLabel)}</span><span class="pill">${esc(a.senderRole)}</span></div><div class="muted">${esc(a.ip)}:${esc(a.port)} · Steam ${esc(a.playerId)}${detail}</div><form method="post" action="/account/remove" onsubmit="return confirm('Usunąć konto?')"><input type="hidden" name="id" value="${esc(a.id)}"><button class="danger">Usuń</button></form></div>`;
+      const chatClass = a.chatStatus === 'AVAILABLE' ? 'ok' : a.chatStatus === 'UNAVAILABLE' ? 'bad' : 'warn';
+      const routing = a.routingMode === 'manual' ? `MANUAL: ${a.manualTeamName || a.teamId}` : a.routingMode === 'auto' ? 'AUTO TEAM' : 'UNASSIGNED';
+      return `<div class="card"><div class="row"><strong>${esc(a.name)}</strong><span class="pill ${a.connected?'ok':'bad'}">${a.connected?'CONNECTED':'OFFLINE'}</span><span class="pill ${teamClass}">${esc(teamLabel)}</span><span class="pill ${chatClass}">TEAM CHAT ${esc(a.chatStatus || 'CHECKING')}</span><span class="pill">${esc(routing)}</span><span class="pill">${esc(a.senderRole)}</span></div><div class="muted">${esc(a.ip)}:${esc(a.port)} · Steam ${esc(a.playerId)}${detail}</div><form method="post" action="/account/remove" onsubmit="return confirm('Usunąć konto?')"><input type="hidden" name="id" value="${esc(a.id)}"><button class="danger">Usuń</button></form></div>`;
     }).join('') : '<div class="card muted">Brak kont Rust+.</div>';
-    const teamHtml = teams.length ? teams.map((t) => `<div class="card"><strong>${esc(t.id)}</strong> · ${esc(t.serverKey)}<div>ACTIVE: <code>${esc(t.activeAccountId || '-')}</code></div><div class="muted">Konta: ${t.accountIds.map(esc).join(', ')} · członkowie teamu: ${t.memberSteamIds.length}</div></div>`).join('') : '<div class="card muted">Brak wykrytych teamów.</div>';
+    const teamHtml = teams.length ? teams.map((t) => `<div class="card"><div class="row"><strong>${esc(t.name || t.id)}</strong><span class="pill">${esc((t.mode || 'auto').toUpperCase())}</span><span class="pill ${t.chatAvailable?'ok':'warn'}">TEAM CHAT ${t.chatAvailable?'AVAILABLE':'UNAVAILABLE/CHECKING'}</span></div><div class="muted">${esc(t.serverKey)}</div><div>ACTIVE: <code>${esc(t.activeAccountId || '-')}</code></div><div class="muted">Konta: ${t.accountIds.map(esc).join(', ') || '-'}${t.mode==='auto' ? ` · członkowie teamu: ${t.memberSteamIds.length}` : ''}</div></div>`).join('') : '<div class="card muted">Brak teamów.</div>';
+
+    const manualTeams = this.db.listManualTeams();
+    const visibleAccountIds = new Set(visible.map((a) => a.id));
+    const manualTeamCards = manualTeams.map((t) => {
+      const mine = isAdmin || t.ownerDiscordId === user.id;
+      const accountRows = (t.accountIds || []).map((id) => {
+        const a = statuses.find((x) => x.id === id); if (!a) return '';
+        const canUnassign = isAdmin || a.ownerDiscordId === user.id;
+        return `<div class="row step"><b>${esc(a.name)}</b><span class="pill ${a.connected?'ok':'bad'}">${a.connected?'ONLINE':'OFFLINE'}</span><span class="pill">${esc(a.senderRole)}</span>${canUnassign?`<form method="post" action="/team/unassign"><input type="hidden" name="accountId" value="${esc(a.id)}"><button class="secondary">Wypisz</button></form>`:''}</div>`;
+      }).join('');
+      return `<div class="card"><div class="row"><h3>${esc(t.name)}</h3><span class="pill">MANUAL</span></div>${accountRows || '<div class="muted">Brak przypisanych kont.</div>'}${mine?`<form method="post" action="/team/remove" onsubmit="return confirm('Usunąć manualny team?')"><input type="hidden" name="teamId" value="${esc(t.id)}"><button class="danger">Usuń team</button></form>`:''}</div>`;
+    }).join('');
+    const assignableAccounts = visible.filter((a) => !this.db.getManualTeamForAccount(a.id));
+    const teamOptions = manualTeams.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join('');
+    const accountOptions = assignableAccounts.map((a) => `<option value="${esc(a.id)}">${esc(a.name)} — ${esc(a.playerId)}</option>`).join('');
+    const manualTeamManager = hasRole ? `<div class="card"><h2>Manual team fallback</h2><p class="muted">Używaj, gdy Rust+ zwraca NO TEAM mimo że gracze są w teamie. Bot wybiera jednego sticky ACTIVE, reszta to BACKUP. Gdy ACTIVE wypada, kolejny dostępny przejmuje automatycznie.</p><div class="grid"><form method="post" action="/team/create"><h3>Utwórz team</h3><input name="name" maxlength="80" placeholder="Np. Renegade Main" required><button>Utwórz</button></form><form method="post" action="/team/assign"><h3>Przypisz konto</h3><select name="teamId" required style="width:100%;background:#0e1319;color:#fff;border:1px solid #394454;border-radius:8px;padding:10px;margin:5px 0 12px">${teamOptions || '<option value="">Najpierw utwórz team</option>'}</select><select name="accountId" required style="width:100%;background:#0e1319;color:#fff;border:1px solid #394454;border-radius:8px;padding:10px;margin:5px 0 12px">${accountOptions || '<option value="">Brak wolnych kont</option>'}</select><button>Przypisz</button></form></div>${manualTeamCards || '<div class="muted">Nie utworzono jeszcze manualnego teamu.</div>'}</div>` : '';
+
 
     let pairingCard = '';
     if (!hasRole) {
@@ -108,7 +131,7 @@ class WebPanel {
       const statusEl=document.getElementById('pair-status');
       async function poll(){try{const r=await fetch('/pairing/status',{cache:'no-store'});const s=await r.json();if(s.phase==='paired'){statusEl.innerHTML='<span class="ok">✅ Serwer dodany: '+String(s.result?.name||'Rust server').replace(/[<>]/g,'')+'</span>';setTimeout(()=>location.reload(),1000);return;}if(s.phase==='idle'){statusEl.innerHTML='<span class="bad">Kod wygasł albo został anulowany.</span>';return;}setTimeout(poll,3000);}catch(e){setTimeout(poll,5000)}}poll();` : '';
 
-    res.send(this.#layout('Rust Helper', `<div class="grid"><div class="card"><h3>Discord</h3><div>${esc(user.username)}</div><div>Rola dostępu: ${hasRole?'<span class="ok">TAK</span>':'<span class="bad">NIE</span>'}</div><div>Steam: ${steamId?`<code>${esc(steamId)}</code>`:'zostanie podpięty po dodaniu Rust+'}</div></div><div class="card"><h3>Routing teamów</h3><p class="muted">Jeden ACTIVE na team, reszta BACKUP. ACTIVE jest sticky i zmienia się tylko gdy wypada.</p></div></div>${pairingCard}${manualForm}<h2>Moje konta Rust+</h2>${accountsHtml}${isAdmin?`<h2>Teamy</h2>${teamHtml}`:''}`, user, script));
+    res.send(this.#layout('Rust Helper', `<div class="grid"><div class="card"><h3>Discord</h3><div>${esc(user.username)}</div><div>Rola dostępu: ${hasRole?'<span class="ok">TAK</span>':'<span class="bad">NIE</span>'}</div><div>Steam: ${steamId?`<code>${esc(steamId)}</code>`:'zostanie podpięty po dodaniu Rust+'}</div></div><div class="card"><h3>Routing teamów</h3><p class="muted">Jeden ACTIVE na team, reszta BACKUP. ACTIVE jest sticky i zmienia się tylko gdy wypada.</p></div></div>${pairingCard}${manualForm}${manualTeamManager}<h2>Moje konta Rust+</h2>${accountsHtml}${isAdmin?`<h2>Routing runtime</h2>${teamHtml}`:''}`, user, script));
   }
 
   #login(req, res) {
@@ -197,6 +220,40 @@ class WebPanel {
     if (!a || (!this.discord.isAdmin(s.user.id) && a.ownerDiscordId !== s.user.id)) return res.status(403).send('Forbidden');
     this.rustManager.stop(id); this.db.removeRustAccount(id); res.redirect('/');
   }
+  async #createTeam(req, res) {
+    try {
+      const s=this.#session(req); if(!s) return res.status(401).send('Unauthorized');
+      if(!(await this.discord.hasAccessRole(s.user.id))) return res.status(403).send('Brak wymaganej roli Discord.');
+      const name=String(req.body.name||'').trim(); if(!name) throw new Error('Podaj nazwę teamu.');
+      this.db.createManualTeam({name,ownerDiscordId:s.user.id}); this.rustManager.refreshRouting(); res.redirect('/');
+    } catch(err){ res.status(400).send(this.#layout('Błąd',`<div class="card bad">${esc(err.message)}</div><a class="btn" href="/">Wróć</a>`)); }
+  }
+
+  async #assignTeam(req, res) {
+    try {
+      const s=this.#session(req); if(!s) return res.status(401).send('Unauthorized');
+      if(!(await this.discord.hasAccessRole(s.user.id))) return res.status(403).send('Brak wymaganej roli Discord.');
+      const accountId=String(req.body.accountId||''); const teamId=String(req.body.teamId||'');
+      const a=this.db.getRustAccount(accountId); if(!a) throw new Error('Nie znaleziono konta.');
+      if(!this.discord.isAdmin(s.user.id) && a.ownerDiscordId!==s.user.id) return res.status(403).send('Możesz przypisać tylko swoje konto Rust+.');
+      this.db.assignAccountToManualTeam(teamId,accountId); this.rustManager.refreshRouting(); res.redirect('/');
+    } catch(err){ res.status(400).send(this.#layout('Błąd',`<div class="card bad">${esc(err.message)}</div><a class="btn" href="/">Wróć</a>`)); }
+  }
+
+  #unassignTeam(req, res) {
+    const s=this.#session(req); if(!s) return res.status(401).send('Unauthorized');
+    const accountId=String(req.body.accountId||''); const a=this.db.getRustAccount(accountId);
+    if(!a || (!this.discord.isAdmin(s.user.id) && a.ownerDiscordId!==s.user.id)) return res.status(403).send('Forbidden');
+    this.db.unassignAccountFromManualTeam(accountId); this.rustManager.refreshRouting(); res.redirect('/');
+  }
+
+  #removeTeam(req, res) {
+    const s=this.#session(req); if(!s) return res.status(401).send('Unauthorized');
+    const teamId=String(req.body.teamId||''); const t=this.db.getManualTeam(teamId);
+    if(!t || (!this.discord.isAdmin(s.user.id) && t.ownerDiscordId!==s.user.id)) return res.status(403).send('Forbidden');
+    this.db.removeManualTeam(teamId); this.rustManager.refreshRouting(); res.redirect('/');
+  }
+
 }
 
 module.exports = { WebPanel };

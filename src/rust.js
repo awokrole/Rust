@@ -34,6 +34,7 @@ class RustManager {
       pollTimer: null, teamPollTimer: null, pollInFlight: false, teamPollInFlight: false,
       chatPrimed: false, recentMessages: new Set(), lastPollErrorAt: 0,
       teamInfo: null, teamContextId: null, teamStatus: 'CHECKING', teamError: null, teamStatusChangedAt: Date.now(),
+      chatStatus: 'CHECKING', chatError: null,
       teamInfoDebugLogged: false, teamContextDebugLogged: false,
       eventPollTimer: null, eventPollInFlight: false, eventPrimed: false
     };
@@ -43,6 +44,7 @@ class RustManager {
       session.connected = true;
       session.connectedAt = Date.now();
       session.chatPrimed = false;
+      session.chatStatus = 'CHECKING'; session.chatError = null;
       console.log(`[Rust+] connected: ${account.id} (${account.name || account.ip})`);
       session.teamStatus = 'CHECKING';
       session.teamError = null;
@@ -53,7 +55,7 @@ class RustManager {
 
     rust.on('message', (message) => {
       const teamMessage = message?.broadcast?.teamMessage?.message;
-      if (teamMessage) this.#onTeamMessage(session, teamMessage).catch(console.error);
+      if (teamMessage) { session.chatStatus = 'AVAILABLE'; session.chatError = null; this.#onTeamMessage(session, teamMessage).catch(console.error); }
     });
 
     rust.on('disconnected', () => {
@@ -62,6 +64,7 @@ class RustManager {
       session.teamContextId = null;
       session.teamStatus = 'DISCONNECTED';
       session.teamError = null;
+      session.chatStatus = 'DISCONNECTED'; session.chatError = null;
       this.#stopChatPolling(session);
       this.#stopTeamPolling(session);
       this.#stopEventPolling(session);
@@ -88,6 +91,7 @@ class RustManager {
   }
 
   restart(id) { const a = this.db.getRustAccount(id); if (!a) return false; this.start(a); return true; }
+  refreshRouting() { this.#rebuildTeams(); return this.listTeams(); }
 
   listStatus() {
     return this.db.listRustAccounts().map((account) => {
@@ -101,7 +105,11 @@ class RustManager {
         senderRole: ctx ? (ctx.activeAccountId === account.id ? 'ACTIVE' : 'BACKUP') : 'UNASSIGNED',
         teamSize: ctx?.memberSteamIds?.length || 0,
         teamStatus: s?.teamStatus || (s?.connected ? 'CHECKING' : 'DISCONNECTED'),
-        teamError: s?.teamError || null
+        teamError: s?.teamError || null,
+        chatStatus: s?.chatStatus || (s?.connected ? 'CHECKING' : 'DISCONNECTED'),
+        chatError: s?.chatError || null,
+        routingMode: ctx?.mode || null,
+        manualTeamName: ctx?.mode === 'manual' ? ctx.name : null
       };
     });
   }
@@ -116,7 +124,10 @@ class RustManager {
         memberSteamIds: [...ctx.memberSteamIds],
         activeAccountId: ctx.activeAccountId,
         accountIds: [...ctx.sessionIds],
-        updatedAt: ctx.updatedAt
+        updatedAt: ctx.updatedAt,
+        mode: ctx.mode || 'auto',
+        name: ctx.name || ctx.id,
+        chatAvailable: ctx.activeAccountId ? this.sessions.get(ctx.activeAccountId)?.chatStatus === 'AVAILABLE' : false
       }));
   }
 
@@ -132,16 +143,21 @@ class RustManager {
   }
 
   #startChatPolling(session) {
-    if (!session.connected || session.teamStatus !== 'TEAM_OK' || !session.teamInfo) return;
+    const ctx = session.teamContextId ? this.teamContexts.get(session.teamContextId) : null;
+    const manual = ctx?.mode === 'manual';
+    if (!session.connected || (!manual && (session.teamStatus !== 'TEAM_OK' || !session.teamInfo))) return;
     if (session.pollTimer) return;
     const poll = () => this.#pollTeamChat(session).catch((err) => {
       const code = this.#errorCode(err);
       if (code === 'not_found') {
-        this.#setTeamState(session, 'NO_TEAM', 'not_found');
-        session.teamInfo = null;
-        session.teamContextId = null;
+        session.chatStatus = 'UNAVAILABLE'; session.chatError = 'not_found';
+        const ctx = session.teamContextId ? this.teamContexts.get(session.teamContextId) : null;
+        if (ctx?.mode !== 'manual') {
+          this.#setTeamState(session, 'NO_TEAM', 'not_found');
+          session.teamInfo = null; session.teamContextId = null; this.#rebuildTeams();
+        }
         this.#stopChatPolling(session);
-        this.#rebuildTeams();
+        if (ctx?.mode === 'manual') this.#rebuildTeams();
         return;
       }
       const now = Date.now();
@@ -332,14 +348,11 @@ class RustManager {
     } catch (err) {
       const code = this.#errorCode(err);
       session.teamInfo = null;
-      session.teamContextId = null;
-      this.#stopChatPolling(session);
+      this.#setTeamState(session, code === 'not_found' ? 'NO_TEAM' : 'TEAM_API_ERROR', code || 'unknown');
       this.#rebuildTeams();
-      if (code === 'not_found') {
-        this.#setTeamState(session, 'NO_TEAM', 'not_found');
-        return;
-      }
-      this.#setTeamState(session, 'TEAM_API_ERROR', code || 'unknown');
+      const ctx = session.teamContextId ? this.teamContexts.get(session.teamContextId) : null;
+      if (ctx?.mode === 'manual') this.#startChatPolling(session); else this.#stopChatPolling(session);
+      if (code === 'not_found') return;
       throw err;
     } finally { session.teamPollInFlight = false; }
   }
@@ -347,75 +360,87 @@ class RustManager {
   #serverKey(session) { return `${session.account.ip}:${session.account.port}`; }
 
   #rebuildTeams() {
+    const oldContexts = new Map(this.teamContexts);
+    const nextContexts = new Map();
+    const manuallyAssigned = new Set();
+
+    // 1) Manual teams always win over auto detection. This is the fallback for servers
+    // where Companion returns not_found for getTeamInfo/getTeamChat discovery.
+    for (const manual of this.db.listManualTeams()) {
+      const sessions = (manual.accountIds || []).map((id) => this.sessions.get(id)).filter(Boolean);
+      for (const sess of sessions) manuallyAssigned.add(sess.account.id);
+      const serverKeys = [...new Set(sessions.map((x) => this.#serverKey(x)))];
+      const serverKey = serverKeys.length === 1 ? serverKeys[0] : (serverKeys.length ? 'MULTI-SERVER (invalid)' : '-');
+      const connected = sessions.filter((x) => x.connected);
+      let activeId = manual.activeAccountId;
+      const currentActive = activeId ? connected.find((x) => x.account.id === activeId) : null;
+      const preferred = connected.filter((x) => x.chatStatus !== 'UNAVAILABLE');
+      const pool = preferred.length ? preferred : connected;
+      const activeValid = currentActive && (currentActive.chatStatus !== 'UNAVAILABLE' || preferred.length === 0);
+      if (!activeValid) {
+        const candidate = pool.sort((a,b) => {
+          const rank=(x)=>x.chatStatus==='AVAILABLE'?0:x.chatStatus==='CHECKING'?1:2;
+          return rank(a)-rank(b) || (a.connectedAt||0)-(b.connectedAt||0) || a.account.id.localeCompare(b.account.id);
+        })[0];
+        activeId = candidate?.account.id || null;
+        if (activeId !== manual.activeAccountId) this.db.setManualTeamActive(manual.id, activeId);
+        if (activeId) console.log(`[Teams] ${manual.id} ACTIVE -> ${activeId} (manual)`);
+      }
+      const previous = oldContexts.get(manual.id);
+      const ctx = {
+        ...(previous || {}), id: manual.id, name: manual.name, mode: 'manual', serverKey,
+        memberSteamIds: uniqSorted(sessions.map((x) => x.account.playerId)), leaderSteamId: '',
+        sessionIds: sessions.map((x) => x.account.id), activeAccountId: activeId,
+        createdAt: previous?.createdAt || Date.now(), updatedAt: Date.now(),
+        eventState: previous?.eventState || {}, eventPrimed: previous?.eventPrimed || false
+      };
+      nextContexts.set(ctx.id, ctx);
+      for (const sess of sessions) sess.teamContextId = ctx.id;
+    }
+
+    // 2) Auto teams for accounts not manually assigned.
     const groups = new Map();
     for (const session of this.sessions.values()) {
+      if (manuallyAssigned.has(session.account.id)) continue;
       if (!session.connected || !session.teamInfo?.memberSteamIds?.length) continue;
       const rosterKey = session.teamInfo.memberSteamIds.join(',');
       const key = `${this.#serverKey(session)}|${rosterKey}`;
-      if (!groups.has(key)) groups.set(key, {
-        serverKey: this.#serverKey(session),
-        memberSteamIds: session.teamInfo.memberSteamIds,
-        leaderSteamId: session.teamInfo.leaderSteamId,
-        sessions: []
-      });
+      if (!groups.has(key)) groups.set(key, { serverKey:this.#serverKey(session), memberSteamIds:session.teamInfo.memberSteamIds, leaderSteamId:session.teamInfo.leaderSteamId, sessions:[] });
       groups.get(key).sessions.push(session);
     }
 
-    const oldContexts = [...this.teamContexts.values()];
+    const oldAuto = [...oldContexts.values()].filter((x) => x.mode !== 'manual');
     const usedOld = new Set();
-    const nextContexts = new Map();
-    const sortedGroups = [...groups.values()].sort((a, b) => b.memberSteamIds.length - a.memberSteamIds.length);
-
+    const sortedGroups = [...groups.values()].sort((a,b) => b.memberSteamIds.length-a.memberSteamIds.length);
     for (const group of sortedGroups) {
-      let best = null;
-      let bestScore = 0;
-      for (const old of oldContexts) {
+      let best=null,bestScore=0;
+      for (const old of oldAuto) {
         if (usedOld.has(old.id) || old.serverKey !== group.serverKey) continue;
-        const inter = intersectionSize(old.memberSteamIds, group.memberSteamIds);
-        if (!inter) continue;
-        let score = inter * 100;
-        if (inter >= 2 && old.activeAccountId) {
-          const active = this.sessions.get(old.activeAccountId);
-          if (active && group.memberSteamIds.includes(String(active.account.playerId))) score += 20;
-        }
-        if (old.leaderSteamId && old.leaderSteamId === group.leaderSteamId) score += 10;
-        if (score > bestScore) { best = old; bestScore = score; }
+        const inter=intersectionSize(old.memberSteamIds, group.memberSteamIds); if(!inter) continue;
+        let score=inter*100;
+        if(inter>=2 && old.activeAccountId){ const active=this.sessions.get(old.activeAccountId); if(active && group.memberSteamIds.includes(String(active.account.playerId))) score+=20; }
+        if(old.leaderSteamId && old.leaderSteamId===group.leaderSteamId) score+=10;
+        if(score>bestScore){best=old;bestScore=score;}
       }
-
-      const ctx = best ? { ...best } : {
-        id: `team-${this.nextTeamId++}`,
-        createdAt: Date.now(),
-        activeAccountId: null,
-        eventState: {},
-        eventPrimed: false
-      };
-      if (best) usedOld.add(best.id);
-      ctx.serverKey = group.serverKey;
-      ctx.memberSteamIds = [...group.memberSteamIds];
-      ctx.leaderSteamId = group.leaderSteamId;
-      ctx.sessionIds = group.sessions.map((s) => s.account.id);
-      ctx.updatedAt = Date.now();
-
-      const activeStillValid = ctx.activeAccountId && ctx.sessionIds.includes(ctx.activeAccountId) && this.sessions.get(ctx.activeAccountId)?.connected;
-      if (!activeStillValid) {
-        const candidate = [...group.sessions]
-          .filter((s) => s.connected)
-          .sort((a, b) => (a.connectedAt || 0) - (b.connectedAt || 0) || a.account.id.localeCompare(b.account.id))[0];
-        const previous = ctx.activeAccountId;
-        ctx.activeAccountId = candidate?.account.id || null;
-        if (ctx.activeAccountId && previous !== ctx.activeAccountId) {
-          console.log(`[Teams] ${ctx.id} ACTIVE -> ${ctx.activeAccountId}`);
-        }
-      }
-
-      nextContexts.set(ctx.id, ctx);
-      for (const s of group.sessions) s.teamContextId = ctx.id;
+      const ctx=best?{...best}:{id:`team-${this.nextTeamId++}`,createdAt:Date.now(),activeAccountId:null,eventState:{},eventPrimed:false,mode:'auto'};
+      if(best) usedOld.add(best.id);
+      ctx.mode='auto'; ctx.name=ctx.id; ctx.serverKey=group.serverKey; ctx.memberSteamIds=[...group.memberSteamIds]; ctx.leaderSteamId=group.leaderSteamId; ctx.sessionIds=group.sessions.map((x)=>x.account.id); ctx.updatedAt=Date.now();
+      const valid=ctx.activeAccountId && ctx.sessionIds.includes(ctx.activeAccountId) && this.sessions.get(ctx.activeAccountId)?.connected;
+      if(!valid){ const c=[...group.sessions].filter((x)=>x.connected).sort((a,b)=>(a.connectedAt||0)-(b.connectedAt||0)||a.account.id.localeCompare(b.account.id))[0]; const prev=ctx.activeAccountId; ctx.activeAccountId=c?.account.id||null; if(ctx.activeAccountId&&prev!==ctx.activeAccountId) console.log(`[Teams] ${ctx.id} ACTIVE -> ${ctx.activeAccountId}`); }
+      nextContexts.set(ctx.id,ctx); for(const sess of group.sessions) sess.teamContextId=ctx.id;
     }
 
-    for (const s of this.sessions.values()) {
-      if (![...nextContexts.values()].some((ctx) => ctx.sessionIds.includes(s.account.id))) s.teamContextId = null;
+    for (const sess of this.sessions.values()) {
+      if (![...nextContexts.values()].some((ctx)=>ctx.sessionIds.includes(sess.account.id))) sess.teamContextId=null;
     }
-    this.teamContexts = nextContexts;
+    this.teamContexts=nextContexts;
+
+    // Manual groups may poll team chat even when TeamInfo API says NO_TEAM.
+    for (const ctx of this.teamContexts.values()) if (ctx.mode === 'manual') {
+      for (const id of ctx.sessionIds) {
+        const sess=this.sessions.get(id); if(sess?.connected && !sess.pollTimer) this.#startChatPolling(sess);
+      }
+    }
   }
 
   #isActiveSender(session) {
@@ -425,10 +450,13 @@ class RustManager {
   }
 
   async #pollTeamChat(session) {
-    if (!session.connected || session.pollInFlight || session.teamStatus !== 'TEAM_OK' || !this.sessions.has(session.account.id)) return;
+    const ctx = session.teamContextId ? this.teamContexts.get(session.teamContextId) : null;
+    const manual = ctx?.mode === 'manual';
+    if (!session.connected || session.pollInFlight || (!manual && session.teamStatus !== 'TEAM_OK') || !this.sessions.has(session.account.id)) return;
     session.pollInFlight = true;
     try {
       const teamChat = await this.#requestTeamChat(session, 5000);
+      session.chatStatus = 'AVAILABLE'; session.chatError = null;
       const messages = teamChat?.messages || [];
       if (!session.chatPrimed) {
         for (const m of messages) this.#rememberMessage(session, m);

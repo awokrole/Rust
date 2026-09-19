@@ -1,6 +1,6 @@
 {
   "name": "rust-helper-bot",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "description": "Discord + Rust+ helper bot with safe ticket-based Rust+ pairing, multi-team sticky failover, web panel and event alerts.",
   "main": "src/index.js",

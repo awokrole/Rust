@@ -6,7 +6,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "check": "node --check src/index.js && node --check src/config.js && node --check src/crypto.js && node --check src/db.js && node --check src/discord.js && node --check src/rust.js && node --check src/commands.js && node --check src/pairing.js && node --check src/api.js && node --check src/rustclash.js",
+    "check": "node --check src/index.js && node --check src/config.js && node --check src/crypto.js && node --check src/db.js && node --check src/discord.js && node --check src/rust.js && node --check src/commands.js && node --check src/pairing.js && node --check src/api.js && node --check src/rustclash.js && node --check src/deltaforce.js",
     "gen-key": "node -e \"console.log(require('node:crypto').randomBytes(32).toString('base64'))\"",
     "postinstall": "node scripts/patch-rustplus-proto.js"
   },

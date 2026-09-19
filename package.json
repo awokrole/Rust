@@ -1,6 +1,6 @@
 {
   "name": "rust-helper-bot",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "description": "Discord-only Rust+ helper bot with Smart Device Discord panels, item crafting calculator, events, Oil Rigs, deaths and multi-account routing.",
   "main": "src/index.js",

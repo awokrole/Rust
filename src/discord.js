@@ -1,3 +1,4 @@
+const { buildDeltaCommand, handleDeltaInteraction } = require('./deltaforce');
 const {
   Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, Events, MessageFlags,
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle
@@ -186,7 +187,8 @@ class DiscordManager {
         .addStringOption(o=>o.setName('device').setDescription('Urządzenie').setRequired(true).setAutocomplete(true)),
       new SlashCommandBuilder().setName('device-panel').setDescription('Wyślij panel ON/OFF/STATUS na Discord.')
         .addStringOption(o=>o.setName('group').setDescription('Grupa do sterowania').setRequired(true).setAutocomplete(true)),
-      new SlashCommandBuilder().setName('teams').setDescription('Pokaż manualne teamy i ACTIVE/BACKUP.')
+      new SlashCommandBuilder().setName('teams').setDescription('Pokaż manualne teamy i ACTIVE/BACKUP.'),
+      buildDeltaCommand()
     ].map(c=>c.toJSON());
     const rest = new REST({ version: '10' }).setToken(this.config.discordToken);
     await rest.put(Routes.applicationGuildCommands(this.config.discordClientId, this.config.discordGuildId), { body: commands });
@@ -221,6 +223,20 @@ class DiscordManager {
         }
       } catch (_) { try { await interaction.respond([]); } catch (_) {} }
       return;
+    }
+    // Delta Force has its own role gate and also uses buttons + modals.
+    if ((interaction.isChatInputCommand() && interaction.commandName === 'delta')
+      || (interaction.isButton() && String(interaction.customId || '').startsWith('delta:'))
+      || (interaction.isModalSubmit() && String(interaction.customId || '').startsWith('delta:'))) {
+      try {
+        const handled = await handleDeltaInteraction(interaction, { db: this.db });
+        if (handled) return;
+      } catch (err) {
+        console.error('[Delta] interaction error:', err);
+        const payload = { content: `❌ ${err.message || 'Wystąpił błąd Delta Force.'}`, flags: MessageFlags.Ephemeral };
+        if (interaction.replied || interaction.deferred) await interaction.followUp(payload); else await interaction.reply(payload);
+        return;
+      }
     }
     if (interaction.isButton()) { await this.#handleSmartButton(interaction); return; }
     if (!interaction.isChatInputCommand()) return;

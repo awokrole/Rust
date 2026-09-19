@@ -10,12 +10,12 @@ class JsonDb {
     this.data = this.#load();
   }
 
-  #blank() { return { version: 5, links: {}, pendingLinks: {}, rustAccounts: {}, rustAuth: {}, manualTeams: {}, smartDevices: {}, smartGroups: {} }; }
+  #blank() { return { version: 6, links: {}, pendingLinks: {}, rustAccounts: {}, rustAuth: {}, manualTeams: {}, smartDevices: {}, smartGroups: {}, deltaRaids: [] }; }
 
   #load() {
     if (!fs.existsSync(this.file)) return this.#blank();
     const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-    return { ...this.#blank(), ...parsed, version: 5, rustAuth: parsed.rustAuth || {}, manualTeams: parsed.manualTeams || {}, smartDevices: parsed.smartDevices || {}, smartGroups: parsed.smartGroups || {} };
+    return { ...this.#blank(), ...parsed, version: 6, rustAuth: parsed.rustAuth || {}, manualTeams: parsed.manualTeams || {}, smartDevices: parsed.smartDevices || {}, smartGroups: parsed.smartGroups || {}, deltaRaids: Array.isArray(parsed.deltaRaids) ? parsed.deltaRaids : [] };
   }
 
   save() {
@@ -307,6 +307,79 @@ class JsonDb {
     this.save();
     return true;
   }
+
+  addDeltaRaid({ guildId, userId, result, amount, entryCost = null, carryOutValue = null, matchCost = null, mapName = null, kills = null, note = null }) {
+    const id = `df-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const raid = {
+      id,
+      guildId: String(guildId),
+      userId: String(userId),
+      result: result === 'win' ? 'win' : 'loss',
+      amount: Number(amount),
+      entryCost: entryCost == null ? null : Number(entryCost),
+      carryOutValue: carryOutValue == null ? null : Number(carryOutValue),
+      matchCost: matchCost == null ? null : Number(matchCost),
+      mapName: mapName ? String(mapName).trim().slice(0, 80) : null,
+      kills: kills == null ? null : Number(kills),
+      note: note ? String(note).trim().slice(0, 200) : null,
+      createdAt: new Date().toISOString()
+    };
+    if (!Number.isSafeInteger(raid.amount)) throw new Error('Nieprawidłowa kwota.');
+    for (const v of [raid.entryCost, raid.carryOutValue, raid.matchCost]) {
+      if (v != null && (!Number.isSafeInteger(v) || v < 0)) throw new Error('Nieprawidłowe dane ekonomiczne raidu.');
+    }
+    this.data.deltaRaids.push(raid);
+    this.save();
+    return { ...raid };
+  }
+
+  listDeltaRaids(guildId, userId, limit = 10) {
+    const gid = String(guildId), uid = String(userId);
+    return this.data.deltaRaids
+      .filter(r => r.guildId === gid && r.userId === uid)
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+      .slice(0, Math.max(1, Math.min(100, Number(limit) || 10)))
+      .map(r => ({ ...r }));
+  }
+
+  getDeltaStats(guildId, userId) {
+    const rows = this.listDeltaRaids(guildId, userId, 1000000);
+    const wins = rows.filter(r => r.result === 'win').length;
+    const losses = rows.filter(r => r.result === 'loss').length;
+    const amounts = rows.map(r => Number(r.amount) || 0);
+    return {
+      total: rows.length,
+      wins,
+      losses,
+      netTotal: amounts.reduce((a, b) => a + b, 0),
+      profitTotal: amounts.filter(x => x > 0).reduce((a, b) => a + b, 0),
+      lossTotal: amounts.filter(x => x < 0).reduce((a, b) => a + b, 0),
+      bestRaid: amounts.length ? Math.max(...amounts) : 0,
+      worstRaid: amounts.length ? Math.min(...amounts) : 0
+    };
+  }
+
+  removeLastDeltaRaid(guildId, userId) {
+    const gid = String(guildId), uid = String(userId);
+    let idx = -1;
+    for (let i = this.data.deltaRaids.length - 1; i >= 0; i--) {
+      const r = this.data.deltaRaids[i];
+      if (r.guildId === gid && r.userId === uid) { idx = i; break; }
+    }
+    if (idx < 0) return null;
+    const [removed] = this.data.deltaRaids.splice(idx, 1);
+    this.save();
+    return { ...removed };
+  }
+
+  removeDeltaRaid(id, guildId, userId) {
+    const idx = this.data.deltaRaids.findIndex(r => r.id === String(id) && r.guildId === String(guildId) && r.userId === String(userId));
+    if (idx < 0) return null;
+    const [removed] = this.data.deltaRaids.splice(idx, 1);
+    this.save();
+    return { ...removed };
+  }
+
 }
 
 module.exports = { JsonDb };

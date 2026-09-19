@@ -10,14 +10,12 @@ class JsonDb {
     this.data = this.#load();
   }
 
-  #blank() {
-    return { version: 2, links: {}, pendingLinks: {}, rustAccounts: {} };
-  }
+  #blank() { return { version: 3, links: {}, pendingLinks: {}, rustAccounts: {}, rustAuth: {} }; }
 
   #load() {
     if (!fs.existsSync(this.file)) return this.#blank();
     const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-    return { ...this.#blank(), ...parsed, version: 2 };
+    return { ...this.#blank(), ...parsed, version: 3, rustAuth: parsed.rustAuth || {} };
   }
 
   save() {
@@ -27,12 +25,9 @@ class JsonDb {
   }
 
   createLinkCode(discordId) {
-    for (const [code, entry] of Object.entries(this.data.pendingLinks)) {
-      if (entry.discordId === discordId) delete this.data.pendingLinks[code];
-    }
+    for (const [code, entry] of Object.entries(this.data.pendingLinks)) if (entry.discordId === discordId) delete this.data.pendingLinks[code];
     let code;
-    do code = String(Math.floor(100000 + Math.random() * 900000));
-    while (this.data.pendingLinks[code]);
+    do code = String(Math.floor(100000 + Math.random() * 900000)); while (this.data.pendingLinks[code]);
     this.data.pendingLinks[code] = { discordId, expiresAt: Date.now() + 10 * 60 * 1000 };
     this.save();
     return code;
@@ -42,31 +37,52 @@ class JsonDb {
     const entry = this.data.pendingLinks[code];
     if (!entry) return { ok: false, reason: 'invalid' };
     delete this.data.pendingLinks[code];
-    if (entry.expiresAt < Date.now()) {
-      this.save();
-      return { ok: false, reason: 'expired' };
-    }
-    for (const [existingSteamId, existingDiscordId] of Object.entries(this.data.links)) {
-      if (existingDiscordId === entry.discordId) delete this.data.links[existingSteamId];
-    }
-    this.data.links[String(steamId)] = entry.discordId;
+    if (entry.expiresAt < Date.now()) { this.save(); return { ok: false, reason: 'expired' }; }
+    this.linkSteamToDiscord(steamId, entry.discordId, false);
     this.save();
     return { ok: true, discordId: entry.discordId };
   }
 
+  linkSteamToDiscord(steamId, discordId, save = true) {
+    for (const [existingSteamId, existingDiscordId] of Object.entries(this.data.links)) {
+      if (existingDiscordId === String(discordId)) delete this.data.links[existingSteamId];
+    }
+    this.data.links[String(steamId)] = String(discordId);
+    if (save) this.save();
+  }
+
   getDiscordIdBySteamId(steamId) { return this.data.links[String(steamId)] || null; }
   getSteamIdByDiscordId(discordId) {
-    for (const [steamId, id] of Object.entries(this.data.links)) if (id === discordId) return steamId;
+    for (const [steamId, id] of Object.entries(this.data.links)) if (id === String(discordId)) return steamId;
     return null;
   }
   unlinkDiscord(discordId) {
     let removed = false;
-    for (const [steamId, id] of Object.entries(this.data.links)) {
-      if (id === discordId) { delete this.data.links[steamId]; removed = true; }
-    }
+    for (const [steamId, id] of Object.entries(this.data.links)) if (id === String(discordId)) { delete this.data.links[steamId]; removed = true; }
     if (removed) this.save();
     return removed;
   }
+
+  setRustAuth(discordId, authToken, meta = {}) {
+    const id = String(discordId);
+    this.data.rustAuth[id] = {
+      ...this.data.rustAuth[id],
+      ...meta,
+      authTokenSecret: this.secretBox?.encryptText(authToken) ?? { plaintextText: String(authToken) },
+      updatedAt: new Date().toISOString()
+    };
+    this.save();
+    return this.getRustAuth(id);
+  }
+
+  getRustAuth(discordId) {
+    const stored = this.data.rustAuth[String(discordId)];
+    if (!stored) return null;
+    return { ...stored, authToken: this.secretBox ? this.secretBox.decryptText(stored.authTokenSecret) : String(stored.authTokenSecret?.plaintextText || ''), authTokenSecret: undefined };
+  }
+
+  hasRustAuth(discordId) { return Boolean(this.data.rustAuth[String(discordId)]); }
+  removeRustAuth(discordId) { const ok = delete this.data.rustAuth[String(discordId)]; if (ok) this.save(); return ok; }
 
   upsertRustAccount(account) {
     const existing = this.data.rustAccounts[account.id] || {};
@@ -89,12 +105,7 @@ class JsonDb {
     return copy;
   }
 
-  removeRustAccount(id) {
-    if (!this.data.rustAccounts[id]) return false;
-    delete this.data.rustAccounts[id];
-    this.save();
-    return true;
-  }
+  removeRustAccount(id) { if (!this.data.rustAccounts[id]) return false; delete this.data.rustAccounts[id]; this.save(); return true; }
   listRustAccounts() { return Object.values(this.data.rustAccounts).map((a) => this.#hydrateAccount(a)); }
   getRustAccount(id) { return this.#hydrateAccount(this.data.rustAccounts[id]); }
 }

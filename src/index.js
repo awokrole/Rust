@@ -3,6 +3,7 @@ const { SecretBox } = require('./crypto');
 const { JsonDb } = require('./db');
 const { DiscordManager } = require('./discord');
 const { RustManager } = require('./rust');
+const { PairingManager } = require('./pairing');
 const { WebPanel } = require('./web');
 
 async function main() {
@@ -24,7 +25,8 @@ async function main() {
 
   await discord.start();
   rust.startAll();
-  const web = new WebPanel({ config, db, discord, rustManager: rust });
+  const pairing = new PairingManager({ db, rustManager: rust, baseUrl: config.baseUrl });
+  const web = new WebPanel({ config, db, discord, rustManager: rust, pairingManager: pairing });
   web.start();
 
   const shutdown = () => {

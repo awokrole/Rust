@@ -48,6 +48,9 @@ class RustManager {
       console.log(`[Rust+] connected: ${account.id} (${account.name || account.ip})`);
       session.teamStatus = 'CHECKING';
       session.teamError = null;
+      // Team chat is independent from getTeamInfo(). This restores the polling
+      // path that proved reliable in the earlier local version.
+      this.#startChatPolling(session);
       this.#refreshTeamInfo(session).catch(() => {});
       this.#startTeamPolling(session);
       this.#startEventPolling(session);
@@ -143,32 +146,33 @@ class RustManager {
   }
 
   #startChatPolling(session) {
-    const ctx = session.teamContextId ? this.teamContexts.get(session.teamContextId) : null;
-    const manual = ctx?.mode === 'manual';
-    if (!session.connected || (!manual && (session.teamStatus !== 'TEAM_OK' || !session.teamInfo))) return;
-    if (session.pollTimer) return;
+    if (!session.connected || session.pollTimer) return;
+
     const poll = () => this.#pollTeamChat(session).catch((err) => {
-      const code = this.#errorCode(err);
-      if (code === 'not_found') {
-        session.chatStatus = 'UNAVAILABLE'; session.chatError = 'not_found';
-        const ctx = session.teamContextId ? this.teamContexts.get(session.teamContextId) : null;
-        if (ctx?.mode !== 'manual') {
-          this.#setTeamState(session, 'NO_TEAM', 'not_found');
-          session.teamInfo = null; session.teamContextId = null; this.#rebuildTeams();
-        }
-        this.#stopChatPolling(session);
-        if (ctx?.mode === 'manual') this.#rebuildTeams();
-        return;
+      const code = this.#errorCode(err) || 'unknown';
+      const previous = session.chatStatus;
+      session.chatStatus = 'UNAVAILABLE';
+      session.chatError = code;
+
+      // Chat availability is deliberately independent from TeamInfo. A server can
+      // return not_found for getTeamInfo while getTeamChat still works.
+      if (previous !== 'UNAVAILABLE') {
+        console.log(`[Rust+] team-chat status ${session.account.id}: UNAVAILABLE (${code})`);
+        this.#rebuildTeams();
       }
+
       const now = Date.now();
-      if (now - session.lastPollErrorAt > 60000) {
+      if (code !== 'not_found' && now - session.lastPollErrorAt > 60000) {
         session.lastPollErrorAt = now;
         console.error(`[Rust+] team-chat poll failed (${session.account.id}):`, err?.message || err);
       }
+      // Do NOT stop polling. Team chat may become available later after a team
+      // change, reconnect or delayed Companion state update.
     });
+
     poll();
     session.pollTimer = setInterval(poll, this.chatPollMs);
-    console.log(`[Rust+] team-chat polling enabled: ${session.account.id} (${this.chatPollMs} ms)`);
+    console.log(`[Rust+] team-chat polling enabled: ${session.account.id} (${this.chatPollMs} ms, independent mode)`);
   }
   #stopChatPolling(session) { if (session.pollTimer) clearInterval(session.pollTimer); session.pollTimer = null; session.pollInFlight = false; }
 
@@ -288,36 +292,13 @@ class RustManager {
     });
   }
 
-  #requestTeamChat(session, timeoutMs = 5000) {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        reject(new Error('team_chat_timeout'));
-      }, timeoutMs);
-      const done = (message) => {
-        if (settled) return true;
-        settled = true;
-        clearTimeout(timer);
-        const response = message?.response;
-        if (!response) { reject(new Error('team_chat_empty_response')); return true; }
-        if (response.error) { reject(response.error); return true; }
-        resolve(response.teamChat || { messages: [] });
-        return true;
-      };
-      try {
-        // Newer rustplus.js versions expose getTeamChat; older ones can still use sendRequest.
-        if (typeof session.rust.getTeamChat === 'function') session.rust.getTeamChat(done);
-        else session.rust.sendRequest({ getTeamChat: {} }, done);
-      } catch (err) {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          reject(err);
-        }
-      }
-    });
+  async #requestTeamChat(session, timeoutMs = 5000) {
+    // rustplus.js sendRequestAsync resolves directly to AppResponse. This is the
+    // same path used by the earlier local build where in-game chat worked.
+    const response = await session.rust.sendRequestAsync({ getTeamChat: {} }, timeoutMs);
+    if (!response) throw new Error('team_chat_empty_response');
+    if (response.error) throw response.error;
+    return response.teamChat || { messages: [] };
   }
 
   async #refreshTeamInfo(session) {
@@ -350,8 +331,8 @@ class RustManager {
       session.teamInfo = null;
       this.#setTeamState(session, code === 'not_found' ? 'NO_TEAM' : 'TEAM_API_ERROR', code || 'unknown');
       this.#rebuildTeams();
-      const ctx = session.teamContextId ? this.teamContexts.get(session.teamContextId) : null;
-      if (ctx?.mode === 'manual') this.#startChatPolling(session); else this.#stopChatPolling(session);
+      // TeamInfo failure must never disable team-chat polling.
+      this.#startChatPolling(session);
       if (code === 'not_found') return;
       throw err;
     } finally { session.teamPollInFlight = false; }
@@ -450,13 +431,16 @@ class RustManager {
   }
 
   async #pollTeamChat(session) {
-    const ctx = session.teamContextId ? this.teamContexts.get(session.teamContextId) : null;
-    const manual = ctx?.mode === 'manual';
-    if (!session.connected || session.pollInFlight || (!manual && session.teamStatus !== 'TEAM_OK') || !this.sessions.has(session.account.id)) return;
+    if (!session.connected || session.pollInFlight || !this.sessions.has(session.account.id)) return;
     session.pollInFlight = true;
     try {
       const teamChat = await this.#requestTeamChat(session, 5000);
+      const changed = session.chatStatus !== 'AVAILABLE';
       session.chatStatus = 'AVAILABLE'; session.chatError = null;
+      if (changed) {
+        console.log(`[Rust+] team-chat status ${session.account.id}: AVAILABLE`);
+        this.#rebuildTeams();
+      }
       const messages = teamChat?.messages || [];
       if (!session.chatPrimed) {
         for (const m of messages) this.#rememberMessage(session, m);

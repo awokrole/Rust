@@ -55,13 +55,41 @@ function normalizePairingEvent(event) {
   return null;
 }
 
+
+function normalizeEntityPairingEvent(event) {
+  for (const obj of collectObjects(event)) {
+    const entityId = getCaseInsensitive(obj, ['entityId', 'entityID', 'entity']);
+    const entityType = getCaseInsensitive(obj, ['entityType', 'entity_type']);
+    const entityName = getCaseInsensitive(obj, ['entityName', 'entity_name', 'name']);
+    const type = String(getCaseInsensitive(obj, ['type']) || '').toLowerCase();
+    if (entityId == null) continue;
+    const entityText = String(entityId).trim();
+    if (!/^\d+$/.test(entityText)) continue;
+    const entityNum = Number(entityText);
+    if (!Number.isSafeInteger(entityNum) || entityNum <= 0) continue;
+    if (type && type !== 'entity') continue;
+    const typeNum = Number(entityType || 0) || 0;
+    return {
+      entityId: entityText,
+      entityType: typeNum,
+      entityName: String(entityName || (typeNum === 1 ? 'Smart Switch' : 'Smart Device')).trim().slice(0, 120),
+      serverName: String(getCaseInsensitive(obj, ['server_name', 'serverName']) || '').trim(),
+      ip: String(getCaseInsensitive(obj, ['ip', 'host', 'hostname']) || '').trim(),
+      port: Number(getCaseInsensitive(obj, ['port', 'appPort', 'app.port']) || 0) || 0
+    };
+  }
+  return null;
+}
+
 class PairingManager {
-  constructor({ db, rustManager, baseUrl, onPaired = null }) {
+  constructor({ db, rustManager, baseUrl, onPaired = null, onDevicePaired = null }) {
     this.db = db;
     this.rustManager = rustManager;
     this.baseUrl = baseUrl;
     this.onPaired = onPaired;
+    this.onDevicePaired = onDevicePaired;
     this.tickets = new Map();
+    this.deviceTickets = new Map();
   }
 
   createTicket(discordId) {
@@ -123,6 +151,82 @@ class PairingManager {
     if (this.onPaired) Promise.resolve(this.onPaired(ticket.discordId, ticket.result)).catch((err) => console.error('[Pairing] notify failed:', err?.message || err));
     return ticket.result;
   }
+
+  createDeviceTicket(discordId, { name = '', groupId = null } = {}) {
+    const code = `DEV-${crypto.randomBytes(6).toString('base64url').toUpperCase()}`;
+    const expiresAt = Date.now() + 15 * 60_000;
+    for (const [existingCode, ticket] of this.deviceTickets) {
+      if (ticket.discordId === String(discordId)) this.deviceTickets.delete(existingCode);
+    }
+    this.deviceTickets.set(code, { discordId: String(discordId), expiresAt, phase: 'waiting', result: null, name: String(name || '').trim(), groupId: groupId || null });
+    return { code, expiresAt, uploadUrl: `${this.baseUrl}/api/device-pairing/${encodeURIComponent(code)}/complete` };
+  }
+
+  deviceStatus(discordId) {
+    for (const [code, ticket] of this.deviceTickets) {
+      if (ticket.discordId !== String(discordId)) continue;
+      if (ticket.expiresAt < Date.now()) { this.deviceTickets.delete(code); continue; }
+      return { phase: ticket.phase, code, expiresAt: ticket.expiresAt, result: ticket.result || null };
+    }
+    return { phase: 'idle' };
+  }
+
+  async completeDeviceTicket(code, payload) {
+    const key = String(code || '').toUpperCase();
+    const ticket = this.deviceTickets.get(key);
+    if (!ticket || ticket.expiresAt < Date.now()) {
+      this.deviceTickets.delete(key);
+      throw new Error('Kod urządzenia jest nieprawidłowy albo wygasł.');
+    }
+    if (ticket.phase === 'paired') return ticket.result;
+
+    const entity = normalizeEntityPairingEvent(payload);
+    if (!entity) throw new Error('Nie znalazłem danych parowania urządzenia (entityId/entityType).');
+    if (entity.entityType && entity.entityType !== 1) {
+      throw new Error(`To urządzenie nie jest Smart Switchem (entityType=${entity.entityType}).`);
+    }
+
+    const accounts = this.db.listRustAccounts().filter((a) => a.ownerDiscordId === ticket.discordId);
+    if (!accounts.length) throw new Error('Najpierw połącz konto Rust+ komendą /pair.');
+
+    let account = null;
+    if (entity.ip && entity.port) {
+      account = accounts.find((a) => String(a.ip) === entity.ip && Number(a.port) === Number(entity.port)) || null;
+    }
+    if (!account) {
+      for (const candidate of accounts) {
+        try {
+          await this.rustManager.getSmartDeviceInfo(candidate.id, entity.entityId);
+          account = candidate;
+          break;
+        } catch (_) {}
+      }
+    }
+    if (!account && accounts.length === 1) account = accounts[0];
+    if (!account) throw new Error('Nie udało się ustalić, do którego konta Rust+ należy ten Smart Switch.');
+
+    let groupId = ticket.groupId || null;
+    if (groupId) {
+      const group = this.db.getSmartGroup(groupId);
+      if (!group || group.ownerDiscordId !== ticket.discordId || group.accountId !== account.id) groupId = null;
+    }
+
+    const device = this.db.addSmartDevice({
+      name: ticket.name || entity.entityName || `Smart Switch ${entity.entityId}`,
+      ownerDiscordId: ticket.discordId,
+      accountId: account.id,
+      entityId: entity.entityId,
+      groupId
+    });
+    let state = null;
+    try { state = (await this.rustManager.getSmartDeviceInfo(account.id, entity.entityId)).value; } catch (_) {}
+
+    ticket.phase = 'paired';
+    ticket.result = { deviceId: device.id, name: device.name, entityId: device.entityId, accountId: device.accountId, groupId: device.groupId, state };
+    ticket.expiresAt = Date.now() + 5 * 60_000;
+    if (this.onDevicePaired) Promise.resolve(this.onDevicePaired(ticket.discordId, ticket.result)).catch((err) => console.error('[Pairing] device notify failed:', err?.message || err));
+    return ticket.result;
+  }
 }
 
-module.exports = { PairingManager, normalizePairingEvent };
+module.exports = { PairingManager, normalizePairingEvent, normalizeEntityPairingEvent };

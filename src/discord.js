@@ -53,6 +53,14 @@ class DiscordManager {
     } catch (err) { console.warn('[Discord] diagnostics DM failed:', err?.message || err); }
   }
 
+  async notifyDevicePairingComplete(discordId, result) {
+    try {
+      const user = await this.client.users.fetch(String(discordId));
+      const state = result.state == null ? 'nieznany' : (result.state ? 'ON' : 'OFF');
+      await user.send(`✅ Smart Switch dodany!\n**${result.name}** — Entity \`${result.entityId}\` — stan: **${state}**\nKonto Rust+: \`${result.accountId}\`${result.groupId ? `\nGrupa: \`${result.groupId}\`` : ''}`);
+    } catch (err) { console.warn('[Discord] device pairing DM failed:', err?.message || err); }
+  }
+
   async sendAlert(message) {
     if (!this.config.discordAlertChannelId) return false;
     try {
@@ -153,6 +161,10 @@ class DiscordManager {
         .addStringOption(o=>o.setName('item').setDescription('Item, np. rocket, c4, satchel').setRequired(true).setAutocomplete(true))
         .addIntegerOption(o=>o.setName('amount').setDescription('Ilość do zrobienia').setRequired(true).setMinValue(1).setMaxValue(1000000)),
       new SlashCommandBuilder().setName('items-refresh').setDescription('Odśwież listę itemów z Rust Items API (admin).'),
+      new SlashCommandBuilder().setName('device-scan').setDescription('Dodaj Smart Switch bez ręcznego Entity ID.')
+        .addStringOption(o=>o.setName('name').setDescription('Nazwa urządzenia, np. Turrety dach').setRequired(false))
+        .addStringOption(o=>o.setName('group').setDescription('Grupa urządzeń (opcjonalnie)').setRequired(false).setAutocomplete(true)),
+      new SlashCommandBuilder().setName('device-scan-status').setDescription('Sprawdź stan parowania Smart Switcha.'),
       new SlashCommandBuilder().setName('device-group-create').setDescription('Utwórz grupę Smart Switchy (np. Turrety).')
         .addStringOption(o=>o.setName('name').setDescription('Nazwa grupy, np. Turrety').setRequired(true))
         .addStringOption(o=>o.setName('account').setDescription('Konto Rust+').setRequired(true).setAutocomplete(true)),
@@ -197,7 +209,7 @@ class DiscordManager {
             .map(a => ({ name: `${a.connected?'🟢':'🔴'} ${a.name}`.slice(0,100), value: a.id.slice(0,100) }));
           return interaction.respond(choices);
         }
-        if (focused.name === 'group' && ['device-add','device-group-assign','device-group-remove','device-panel'].includes(interaction.commandName)) {
+        if (focused.name === 'group' && ['device-add','device-group-assign','device-group-remove','device-panel','device-scan'].includes(interaction.commandName)) {
           const choices = this.#ownedSmartGroups(uid).filter(g => `${g.name} ${g.id}`.toLowerCase().includes(query)).slice(0,25)
             .map(g => ({ name: g.name.slice(0,100), value: g.id.slice(0,100) }));
           return interaction.respond(choices);
@@ -338,6 +350,32 @@ class DiscordManager {
         }
       }
 
+      if (interaction.commandName === 'device-scan') {
+        if (!(await this.hasAccessRole(uid)) && !this.isAdmin(uid)) return interaction.reply({content:'⛔ Brak wymaganej roli Discord.',flags:ephemeral});
+        const groupId=interaction.options.getString('group',false);
+        if(groupId){const g=this.db.getSmartGroup(groupId);if(!g||(!this.isAdmin(uid)&&g.ownerDiscordId!==uid)) return interaction.reply({content:'⛔ Grupa nie istnieje albo brak dostępu.',flags:ephemeral});}
+        const t=this.pairingManager.createDeviceTicket(uid,{name:interaction.options.getString('name',false)||'',groupId});
+        const mins=Math.max(1,Math.ceil((t.expiresAt-Date.now())/60000));
+        return interaction.reply({content:[
+          '📡 **Parowanie Smart Switcha**',
+          `Kod: **${t.code}**`,
+          '',
+          '1. Uruchom najnowszy `RustHelperPairing.exe`.',
+          `2. Wklej kod **${t.code}**. Helper rozpozna tryb urządzenia.`,
+          '3. Poczekaj na komunikat **[GOTOWY]**.',
+          '4. W Rust podejdź do Smart Switcha i kliknij jego opcję **Pair / Pair with Rust+**.',
+          '5. EXE przechwyci nowe powiadomienie z `entityId` i wyśle je do bota.',
+          '6. Bot sam znajdzie właściwe konto Rust+ i zapisze urządzenie.',
+          '',
+          `⏱️ Kod ważny około **${mins} min**.`
+        ].join('\n'),flags:ephemeral});
+      }
+      if (interaction.commandName === 'device-scan-status') {
+        const s=this.pairingManager.deviceStatus(uid);
+        if(s.phase==='idle') return interaction.reply({content:'Brak aktywnego parowania urządzenia. Użyj `/device-scan`.',flags:ephemeral});
+        if(s.phase==='paired') return interaction.reply({content:`✅ Dodano **${s.result?.name||'Smart Switch'}** — Entity \`${s.result?.entityId}\`.`,flags:ephemeral});
+        return interaction.reply({content:`⏳ Czekam na EXE i pairing Smart Switcha. Kod: **${s.code}**`,flags:ephemeral});
+      }
       if (interaction.commandName === 'device-group-create') {
         if (!(await this.hasAccessRole(uid)) && !this.isAdmin(uid)) return interaction.reply({content:'⛔ Brak wymaganej roli Discord.',flags:ephemeral});
         const accountId=interaction.options.getString('account',true), account=this.db.getRustAccount(accountId);

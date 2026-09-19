@@ -36,6 +36,9 @@ async function main() {
           await discord.notifyDiagnostics(discordId, diag);
         } catch (err) { console.warn('[Diagnostics] post-pair test failed:', err?.message || err); }
       }, 4000);
+    },
+    onDevicePaired: async (discordId, result) => {
+      await discord.notifyDevicePairingComplete(discordId, result);
     }
   });
   discord.setRustManager(rust);

@@ -1,16 +1,14 @@
 const crypto = require('node:crypto');
 
-const COMPANION_BASE = 'https://companion-rust.facepunch.com';
-
 function parseMaybeJson(value) {
   if (typeof value !== 'string') return value;
   const trimmed = value.trim();
-  if (!trimmed || !['{','[','"'].includes(trimmed[0])) return value;
+  if (!trimmed) return value;
   try { return JSON.parse(trimmed); } catch (_) { return value; }
 }
 
 function collectObjects(value, out = [], depth = 0) {
-  if (depth > 6 || value == null) return out;
+  if (depth > 8 || value == null) return out;
   const parsed = parseMaybeJson(value);
   if (parsed !== value) return collectObjects(parsed, out, depth + 1);
   if (Array.isArray(value)) {
@@ -35,42 +33,26 @@ function normalizePairingEvent(event) {
   for (const obj of collectObjects(event)) {
     const ip = getCaseInsensitive(obj, ['ip', 'host', 'hostname']);
     const port = getCaseInsensitive(obj, ['port', 'appPort', 'app.port']);
-    const playerId = getCaseInsensitive(obj, ['playerId', 'steamId', 'steamID64']);
-    const playerToken = getCaseInsensitive(obj, ['playerToken', 'token']);
+    const playerId = getCaseInsensitive(obj, ['playerId', 'steamId', 'steamID64', 'playerid']);
+    const playerToken = getCaseInsensitive(obj, ['playerToken', 'playertoken']);
     const type = String(getCaseInsensitive(obj, ['type']) || '').toLowerCase();
-    if (ip && port && playerId && playerToken != null && (type === '' || type === 'server')) {
-      const tokenText = String(playerToken).trim();
-      if (!/^-?\d+$/.test(tokenText)) continue;
-      return {
-        ip: String(ip).trim(),
-        port: Number(port),
-        playerId: String(playerId).trim(),
-        playerToken: Number(tokenText),
-        serverId: String(getCaseInsensitive(obj, ['id', 'serverId']) || ''),
-        name: String(getCaseInsensitive(obj, ['name', 'serverName']) || getCaseInsensitive(event, ['body', 'title']) || 'Rust server').trim()
-      };
-    }
+    if (!ip || !port || !playerId || playerToken == null) continue;
+    if (type && type !== 'server') continue;
+    const tokenText = String(playerToken).trim();
+    const steamText = String(playerId).trim();
+    if (!/^-?\d+$/.test(tokenText) || !/^\d{16,20}$/.test(steamText)) continue;
+    const portNum = Number(port);
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) continue;
+    return {
+      ip: String(ip).trim(),
+      port: portNum,
+      playerId: steamText,
+      playerToken: Number(tokenText),
+      serverId: String(getCaseInsensitive(obj, ['id', 'serverId']) || ''),
+      name: String(getCaseInsensitive(obj, ['name', 'serverName']) || getCaseInsensitive(event, ['body', 'title']) || 'Rust server').trim()
+    };
   }
   return null;
-}
-
-function eventId(event) {
-  const direct = getCaseInsensitive(event, ['id', 'notificationId', 'notificationID']);
-  if (direct != null) return String(direct);
-  return crypto.createHash('sha1').update(JSON.stringify(event)).digest('hex');
-}
-
-function historyEvents(payload) {
-  if (Array.isArray(payload)) return payload;
-  if (!payload || typeof payload !== 'object') return [];
-  for (const key of ['notifications', 'history', 'events', 'data', 'items']) {
-    const value = getCaseInsensitive(payload, [key]);
-    if (Array.isArray(value)) return value;
-    const parsed = parseMaybeJson(value);
-    if (Array.isArray(parsed)) return parsed;
-  }
-  const arrays = Object.values(payload).filter(Array.isArray);
-  return arrays[0] || [];
 }
 
 class PairingManager {
@@ -78,128 +60,67 @@ class PairingManager {
     this.db = db;
     this.rustManager = rustManager;
     this.baseUrl = baseUrl;
-    this.sessions = new Map();
+    this.tickets = new Map();
   }
 
-  createLogin(discordId) {
-    const state = crypto.randomBytes(24).toString('base64url');
-    this.sessions.set(state, { discordId: String(discordId), expiresAt: Date.now() + 15 * 60_000, phase: 'steam-login' });
-    const returnUrl = `${this.baseUrl}/rustplus/callback?state=${encodeURIComponent(state)}`;
-    const loginUrl = `${COMPANION_BASE}/login?returnUrl=${encodeURIComponent(returnUrl)}`;
-    return { state, loginUrl };
-  }
-
-  consumeLoginState(state, discordId = null) {
-    const entry = this.sessions.get(String(state));
-    if (!entry || entry.expiresAt < Date.now()) { this.sessions.delete(String(state)); return null; }
-    if (discordId && entry.discordId !== String(discordId)) return null;
-    return entry;
-  }
-
-  completeLogin(state, authToken, meta = {}) {
-    const entry = this.consumeLoginState(state);
-    if (!entry) throw new Error('Sesja logowania Rust+ wygasła. Zacznij ponownie.');
-    const token = String(authToken || '').trim();
-    if (token.length < 20) throw new Error('Facepunch nie zwrócił prawidłowego tokenu Rust+.');
-    this.db.setRustAuth(entry.discordId, token, { source: 'facepunch-web', ...meta });
-    entry.phase = 'linked';
-    entry.expiresAt = Date.now() + 10 * 60_000;
-    return entry.discordId;
-  }
-
-  async #readHistory(authToken) {
-    const attempts = [
-      { body: JSON.stringify(String(authToken)), contentType: 'application/json' },
-      { body: String(authToken), contentType: 'application/json' },
-      { body: JSON.stringify({ authToken: String(authToken) }), contentType: 'application/json' }
-    ];
-    let lastError;
-    for (const attempt of attempts) {
-      try {
-        const res = await fetch(`${COMPANION_BASE}/api/history/read`, {
-          method: 'POST',
-          headers: { 'Content-Type': attempt.contentType, 'Accept': 'application/json' },
-          body: attempt.body,
-          signal: AbortSignal.timeout(10000)
-        });
-        const text = await res.text();
-        if (!res.ok) { lastError = new Error(`Rust+ history HTTP ${res.status}: ${text.slice(0, 180)}`); continue; }
-        try { return JSON.parse(text); } catch (_) { throw new Error('Rust+ history zwróciło nieprawidłowy JSON.'); }
-      } catch (err) { lastError = err; }
+  createTicket(discordId) {
+    const code = crypto.randomBytes(9).toString('base64url').toUpperCase();
+    const expiresAt = Date.now() + 15 * 60_000;
+    for (const [existingCode, ticket] of this.tickets) {
+      if (ticket.discordId === String(discordId)) this.tickets.delete(existingCode);
     }
-    throw lastError || new Error('Nie udało się pobrać historii Rust+.');
+    this.tickets.set(code, { discordId: String(discordId), expiresAt, phase: 'waiting', result: null });
+    return { code, expiresAt, uploadUrl: `${this.baseUrl}/api/pairing/${encodeURIComponent(code)}/complete` };
   }
 
-  async startPairing(discordId) {
-    const auth = this.db.getRustAuth(discordId);
-    if (!auth?.authToken) throw new Error('Najpierw połącz konto Rust+ przez Steam.');
-    const history = await this.#readHistory(auth.authToken);
-    const baseline = new Set(historyEvents(history).map(eventId));
-    const key = `pair:${discordId}`;
-    this.sessions.set(key, {
-      discordId: String(discordId),
-      phase: 'waiting-server',
-      expiresAt: Date.now() + 10 * 60_000,
-      startedAt: Date.now(),
-      baseline
+  getTicketForDiscord(discordId) {
+    for (const [code, ticket] of this.tickets) {
+      if (ticket.discordId !== String(discordId)) continue;
+      if (ticket.expiresAt < Date.now()) { this.tickets.delete(code); continue; }
+      return { code, ...ticket, uploadUrl: `${this.baseUrl}/api/pairing/${encodeURIComponent(code)}/complete` };
+    }
+    return null;
+  }
+
+  status(discordId) {
+    const ticket = this.getTicketForDiscord(discordId);
+    if (!ticket) return { phase: 'idle' };
+    return { phase: ticket.phase, code: ticket.code, expiresAt: ticket.expiresAt, result: ticket.result || null };
+  }
+
+  cancel(discordId) {
+    for (const [code, ticket] of this.tickets) if (ticket.discordId === String(discordId)) this.tickets.delete(code);
+  }
+
+  completeTicket(code, payload) {
+    const ticket = this.tickets.get(String(code).toUpperCase());
+    if (!ticket || ticket.expiresAt < Date.now()) {
+      this.tickets.delete(String(code).toUpperCase());
+      throw new Error('Kod pairingu jest nieprawidłowy albo wygasł.');
+    }
+    if (ticket.phase === 'paired') return ticket.result;
+
+    const pair = normalizePairingEvent(payload);
+    if (!pair) throw new Error('Nie znalazłem kompletu danych pairingu: ip, port, playerId i playerToken.');
+
+    const accountHash = crypto.createHash('sha1').update(`${pair.playerId}|${pair.ip}|${pair.port}`).digest('hex').slice(0, 12);
+    const account = this.db.upsertRustAccount({
+      id: `web-${ticket.discordId}-${accountHash}`,
+      name: pair.name || 'Rust server',
+      ip: pair.ip,
+      port: pair.port,
+      playerId: pair.playerId,
+      playerToken: pair.playerToken,
+      ownerDiscordId: ticket.discordId,
+      serverPairId: pair.serverId || undefined
     });
-    return { ok: true, expiresAt: this.sessions.get(key).expiresAt };
-  }
-
-  pairingState(discordId) {
-    const s = this.sessions.get(`pair:${discordId}`);
-    if (!s) return { phase: this.db.hasRustAuth(discordId) ? 'ready' : 'not-linked' };
-    if (s.expiresAt < Date.now()) { this.sessions.delete(`pair:${discordId}`); return { phase: 'expired' }; }
-    return { phase: s.phase, expiresAt: s.expiresAt, result: s.result || null, error: s.error || null };
-  }
-
-  async checkPairing(discordId) {
-    const key = `pair:${discordId}`;
-    const s = this.sessions.get(key);
-    if (!s || s.expiresAt < Date.now()) return this.pairingState(discordId);
-    if (s.phase === 'paired' || s.phase === 'error') return this.pairingState(discordId);
-    if (s.inFlight) return this.pairingState(discordId);
-    s.inFlight = true;
-    try {
-      const auth = this.db.getRustAuth(discordId);
-      const history = await this.#readHistory(auth.authToken);
-      const events = historyEvents(history);
-      for (const evt of events) {
-        const id = eventId(evt);
-        if (s.baseline.has(id)) continue;
-        const pair = normalizePairingEvent(evt);
-        if (!pair) continue;
-        const accountHash = crypto.createHash('sha1').update(`${pair.playerId}|${pair.ip}|${pair.port}`).digest('hex').slice(0, 12);
-        const account = this.db.upsertRustAccount({
-          id: `web-${discordId}-${accountHash}`,
-          name: pair.name || 'Rust server',
-          ip: pair.ip,
-          port: pair.port,
-          playerId: pair.playerId,
-          playerToken: pair.playerToken,
-          ownerDiscordId: String(discordId),
-          serverPairId: pair.serverId || undefined
-        });
-        this.db.linkSteamToDiscord(pair.playerId, discordId);
-        this.rustManager.start(account);
-        s.phase = 'paired';
-        s.result = { accountId: account.id, name: account.name, ip: account.ip, port: account.port, playerId: account.playerId };
-        s.expiresAt = Date.now() + 5 * 60_000;
-        return this.pairingState(discordId);
-      }
-      for (const evt of events) s.baseline.add(eventId(evt));
-      return this.pairingState(discordId);
-    } catch (err) {
-      console.error('[Pairing] history check failed:', err?.message || err);
-      s.error = String(err?.message || err);
-      return this.pairingState(discordId);
-    } finally { s.inFlight = false; }
-  }
-
-  unlink(discordId) {
-    this.db.removeRustAuth(discordId);
-    this.sessions.delete(`pair:${discordId}`);
+    this.db.linkSteamToDiscord(pair.playerId, ticket.discordId);
+    this.rustManager.start(account);
+    ticket.phase = 'paired';
+    ticket.result = { accountId: account.id, name: account.name, ip: account.ip, port: account.port, playerId: account.playerId };
+    ticket.expiresAt = Date.now() + 5 * 60_000;
+    return ticket.result;
   }
 }
 
-module.exports = { PairingManager, normalizePairingEvent, historyEvents };
+module.exports = { PairingManager, normalizePairingEvent };

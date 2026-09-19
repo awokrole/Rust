@@ -49,18 +49,18 @@ async function getOilRigState(rust, markers = null) {
 async function getTime(rust) {
   const r = await requestAsync(rust, { getTime: {} });
   if (!r?.time) throw new Error('Rust+ nie zwrócił czasu.');
-  return `🕒 Czas w grze: ${formatGameTime(r.time.time)}`;
+  return `:eyes: Czas w grze: ${formatGameTime(r.time.time)}`;
 }
-async function getCargo(rust) { const m = await getMarkers(rust); return hasType(m, MARKER.CARGO) ? '🚢 Cargo Ship: AKTYWNE' : '🚢 Cargo Ship: brak'; }
-async function getHeli(rust) { const m = await getMarkers(rust); return hasType(m, MARKER.PATROL_HELI) ? '🚁 Patrol Helicopter: AKTYWNY' : '🚁 Patrol Helicopter: brak'; }
-async function getChinook(rust) { const m = await getMarkers(rust); return hasType(m, MARKER.CH47) ? '🚁 CH47/Chinook: AKTYWNY' : '🚁 CH47/Chinook: brak'; }
-async function getCrate(rust) { const m = await getMarkers(rust); return hasType(m, MARKER.CRATE) ? '📦 Locked Crate: AKTYWNA' : '📦 Locked Crate: brak'; }
-async function getSmall(rust) { const s = await getOilRigState(rust); return s.small.active ? '🛢️ Small Oil Rig: AKTYWNY (Locked Crate na rigu)' : '🛢️ Small Oil Rig: brak aktywnego crate'; }
-async function getLarge(rust) { const s = await getOilRigState(rust); return s.large.active ? '🛢️ Large Oil Rig: AKTYWNY (Locked Crate na rigu)' : '🛢️ Large Oil Rig: brak aktywnego crate'; }
+async function getCargo(rust) { const m = await getMarkers(rust); return hasType(m, MARKER.CARGO) ? ':exclamation: Cargo Ship: AKTYWNE' : ':exclamation: Cargo Ship: brak'; }
+async function getHeli(rust) { const m = await getMarkers(rust); return hasType(m, MARKER.PATROL_HELI) ? ':exclamation: Patrol Helicopter: AKTYWNY' : ':exclamation: Patrol Helicopter: brak'; }
+async function getChinook(rust) { const m = await getMarkers(rust); return hasType(m, MARKER.CH47) ? ':exclamation: CH47/Chinook: AKTYWNY' : ':exclamation: CH47/Chinook: brak'; }
+async function getCrate(rust) { const m = await getMarkers(rust); return hasType(m, MARKER.CRATE) ? ':exclamation: Locked Crate: AKTYWNA' : ':exclamation: Locked Crate: brak'; }
+async function getSmall(rust) { const s = await getOilRigState(rust); return s.small.active ? ':exclamation: Small Oil Rig: AKTYWNY (Locked Crate na rigu)' : ':exclamation: Small Oil Rig: brak aktywnego crate'; }
+async function getLarge(rust) { const s = await getOilRigState(rust); return s.large.active ? ':exclamation: Large Oil Rig: AKTYWNY (Locked Crate na rigu)' : ':exclamation: Large Oil Rig: brak aktywnego crate'; }
 async function getEvents(rust) {
   const m = await getMarkers(rust), s = (t) => hasType(m, t) ? '✅' : '❌';
   const oils = await getOilRigState(rust, m);
-  return `🚢 Cargo ${s(MARKER.CARGO)} | 🚁 Heli ${s(MARKER.PATROL_HELI)} | 🚁 CH47 ${s(MARKER.CH47)} | 📦 Crate ${s(MARKER.CRATE)} | 🛢️ Small ${oils.small.active ? '✅' : '❌'} | 🛢️ Large ${oils.large.active ? '✅' : '❌'}`;
+  return `:exclamation: Cargo ${hasType(m, MARKER.CARGO) ? 'AKTYWNE' : 'brak'} | Heli ${hasType(m, MARKER.PATROL_HELI) ? 'AKTYWNY' : 'brak'} | CH47 ${hasType(m, MARKER.CH47) ? 'AKTYWNY' : 'brak'} | Crate ${hasType(m, MARKER.CRATE) ? 'AKTYWNA' : 'brak'} | Small ${oils.small.active ? 'AKTYWNY' : 'brak'} | Large ${oils.large.active ? 'AKTYWNY' : 'brak'}`;
 }
 async function getTeam(rust, onlineOnly = false) {
   let r;
@@ -95,9 +95,9 @@ async function getServer(rust) {
 }
 
 function getDeathsText(deaths = []) {
-  if (!deaths?.length) return '💀 Brak zapisanych śmierci teamu od startu bota.';
+  if (!deaths?.length) return ':skull: Brak zapisanych śmierci teamu od startu bota.';
   const rows = deaths.slice(-5).reverse().map((d, i) => `${i + 1}. ${d.name || d.steamId} — ${d.grid || `x:${Math.round(d.x)} y:${Math.round(d.y)}`} — ${d.ago || ''}`);
-  return `💀 Ostatnie zgony:\n${rows.join('\n')}`.slice(0, 490);
+  return `:skull: Ostatnie zgony:\n${rows.join('\n')}`.slice(0, 490);
 }
 
 async function handleRustCommand({ rust, command, args, isAuthorized, linkHandler, getDeaths }) {

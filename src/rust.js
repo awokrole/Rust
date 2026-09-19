@@ -300,28 +300,75 @@ class RustManager {
 
   async #processDeaths(session) {
     if (!session.teamInfo?.members?.length) return;
+
+    // Rust+ does not always include isAlive/isOnline on every Member update on
+    // current servers. deathTime is much more reliable: it changes when a new
+    // death occurs. Keep both signals and use isAlive only as a fallback.
     const current = new Map();
-    for (const m of session.teamInfo.members) current.set(String(m.steamId), { alive: Boolean(m.isAlive), name: m.name || String(m.steamId), x: Number(m.x || 0), y: Number(m.y || 0) });
+    for (const m of session.teamInfo.members) {
+      const steamId = String(m.steamId);
+      const hasAlive = typeof m.isAlive === 'boolean';
+      const x = Number(m.x);
+      const y = Number(m.y);
+      current.set(steamId, {
+        aliveKnown: hasAlive,
+        alive: hasAlive ? m.isAlive : null,
+        deathTime: Number(m.deathTime || 0),
+        spawnTime: Number(m.spawnTime || 0),
+        name: m.name || steamId,
+        x: Number.isFinite(x) ? x : 0,
+        y: Number.isFinite(y) ? y : 0
+      });
+    }
+
+    // First snapshot is only a baseline. Never announce historical deaths on boot.
     if (!session.memberState.size) { session.memberState = current; return; }
+
     if (!this.#isActiveSender(session)) { session.memberState = current; return; }
     const ctx = this.teamContexts.get(session.teamContextId);
     if (!ctx) { session.memberState = current; return; }
     if (!ctx.deathLog) ctx.deathLog = [];
+
     for (const [steamId, nowState] of current.entries()) {
       const before = session.memberState.get(steamId);
-      if (!before || !before.alive || nowState.alive) continue;
-      const grid = this.#gridFromXY(nowState.x, nowState.y, session.mapSize);
-      const death = { steamId, name: nowState.name, x: nowState.x, y: nowState.y, grid, at: Date.now() };
-      const duplicate = ctx.deathLog.some((d) => d.steamId === steamId && Date.now() - d.at < 15000);
+      if (!before) continue;
+
+      const deathTimeAdvanced = nowState.deathTime > 0 && nowState.deathTime !== Number(before.deathTime || 0);
+      const aliveTransition = before.aliveKnown && nowState.aliveKnown && before.alive === true && nowState.alive === false;
+      if (!deathTimeAdvanced && !aliveTransition) continue;
+
+      // Prefer the newest Rust+ coordinates. If they are absent/zero at the death
+      // snapshot, fall back to the previous known position.
+      const hasNowPosition = Number.isFinite(nowState.x) && Number.isFinite(nowState.y) && (nowState.x !== 0 || nowState.y !== 0);
+      const x = hasNowPosition ? nowState.x : Number(before.x || 0);
+      const y = hasNowPosition ? nowState.y : Number(before.y || 0);
+      const grid = this.#gridFromXY(x, y, session.mapSize);
+      const deathKey = `${steamId}:${nowState.deathTime || Date.now()}`;
+
+      const duplicate = ctx.deathLog.some((d) => d.deathKey === deathKey || (d.steamId === steamId && Date.now() - d.at < 5000));
       if (duplicate) continue;
+
+      const death = {
+        deathKey,
+        deathTime: nowState.deathTime || 0,
+        steamId,
+        name: nowState.name,
+        x,
+        y,
+        grid,
+        at: nowState.deathTime > 0 ? nowState.deathTime * 1000 : Date.now()
+      };
       ctx.deathLog.push(death);
       while (ctx.deathLog.length > 20) ctx.deathLog.shift();
-      const where = grid ? `w sektorze ${grid}` : `na pozycji ${Math.round(nowState.x)}, ${Math.round(nowState.y)}`;
-      const msg = `💀 ${nowState.name} zginął ${where}.`;
-      try { session.rust.sendTeamMessage(msg); } catch (_) {}
-      this.discord.sendAlert(`[${session.account.name || ctx.serverKey}] ${msg}`).catch(() => {});
-      console.log(`[Deaths] ${ctx.id}: ${msg}`);
+
+      const where = grid ? `w sektorze ${grid}` : `na pozycji ${Math.round(x)}, ${Math.round(y)}`;
+      const rustMsg = `:skull: ${nowState.name} zginął ${where}.`;
+      const discordMsg = `💀 ${nowState.name} zginął ${where}.`;
+      try { session.rust.sendTeamMessage(rustMsg); } catch (_) {}
+      this.discord.sendAlert(`[${session.account.name || ctx.serverKey}] ${discordMsg}`).catch(() => {});
+      console.log(`[Deaths] ${ctx.id}: ${rustMsg} deathTime=${nowState.deathTime || '-'} x=${Math.round(x)} y=${Math.round(y)}`);
     }
+
     session.memberState = current;
   }
 
@@ -366,21 +413,22 @@ class RustManager {
         return;
       }
       const defs = {
-        cargo: ['🚢 Cargo Ship pojawił się na mapie!', '🚢 Cargo Ship zniknął z mapy.'],
-        heli: ['🚁 Patrol Helicopter pojawił się!', '🚁 Patrol Helicopter zniknął.'],
-        chinook: ['🚁 CH47/Chinook pojawił się!', '🚁 CH47/Chinook zniknął.'],
-        crate: ['📦 Locked Crate pojawiła się!', '📦 Locked Crate zniknęła.'],
-        small: ['🛢️ Small Oil Rig został aktywowany (Locked Crate)!', '🛢️ Small Oil Rig nie ma już aktywnego Locked Crate.'],
-        large: ['🛢️ Large Oil Rig został aktywowany (Locked Crate)!', '🛢️ Large Oil Rig nie ma już aktywnego Locked Crate.']
+        cargo: { rust: [':exclamation: Cargo Ship pojawił się na mapie!', ':exclamation: Cargo Ship zniknął z mapy.'], discord: ['🚢 Cargo Ship pojawił się na mapie!', '🚢 Cargo Ship zniknął z mapy.'] },
+        heli: { rust: [':exclamation: Patrol Helicopter pojawił się!', ':exclamation: Patrol Helicopter zniknął.'], discord: ['🚁 Patrol Helicopter pojawił się!', '🚁 Patrol Helicopter zniknął.'] },
+        chinook: { rust: [':exclamation: CH47/Chinook pojawił się!', ':exclamation: CH47/Chinook zniknął.'], discord: ['🚁 CH47/Chinook pojawił się!', '🚁 CH47/Chinook zniknął.'] },
+        crate: { rust: [':exclamation: Locked Crate pojawiła się!', ':exclamation: Locked Crate zniknęła.'], discord: ['📦 Locked Crate pojawiła się!', '📦 Locked Crate zniknęła.'] },
+        small: { rust: [':exclamation: Small Oil Rig został aktywowany (Locked Crate)!', ':exclamation: Small Oil Rig nie ma już aktywnego Locked Crate.'], discord: ['🛢️ Small Oil Rig został aktywowany (Locked Crate)!', '🛢️ Small Oil Rig nie ma już aktywnego Locked Crate.'] },
+        large: { rust: [':exclamation: Large Oil Rig został aktywowany (Locked Crate)!', ':exclamation: Large Oil Rig nie ma już aktywnego Locked Crate.'], discord: ['🛢️ Large Oil Rig został aktywowany (Locked Crate)!', '🛢️ Large Oil Rig nie ma już aktywnego Locked Crate.'] }
       };
       for (const [key, now] of Object.entries(current)) {
         const before = Boolean(ctx.eventState[key]);
         if (before === now) continue;
         ctx.eventState[key] = now;
-        const msg = defs[key][now ? 0 : 1];
-        try { session.rust.sendTeamMessage(msg); } catch (_) {}
-        this.discord.sendAlert(`[${session.account.name || ctx.serverKey}] ${msg}`).catch(() => {});
-        console.log(`[Events] ${ctx.id}: ${msg}`);
+        const rustMsg = defs[key].rust[now ? 0 : 1];
+        const discordMsg = defs[key].discord[now ? 0 : 1];
+        try { session.rust.sendTeamMessage(rustMsg); } catch (_) {}
+        this.discord.sendAlert(`[${session.account.name || ctx.serverKey}] ${discordMsg}`).catch(() => {});
+        console.log(`[Events] ${ctx.id}: ${rustMsg}`);
       }
     } finally { session.eventPollInFlight = false; }
   }

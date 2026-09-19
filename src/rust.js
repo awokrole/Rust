@@ -28,7 +28,11 @@ class RustManager {
 
   start(account) {
     this.stop(account.id);
-    const rust = new RustPlus(account.ip, String(account.port), String(account.playerId), Number(account.playerToken));
+    const portValue = String(account.port).trim();
+    const playerIdValue = String(account.playerId).trim();
+    const playerTokenValue = Number(account.playerToken);
+    this.#logAccountInput(account, { portValue, playerIdValue, playerTokenValue });
+    const rust = new RustPlus(String(account.ip).trim(), portValue, playerIdValue, playerTokenValue);
     const session = {
       account, rust, connected: false, connectedAt: 0, reconnectTimer: null,
       pollTimer: null, teamPollTimer: null, pollInFlight: false, teamPollInFlight: false,
@@ -173,6 +177,33 @@ class RustManager {
         name: ctx.name || ctx.id,
         chatAvailable: ctx.activeAccountId ? this.sessions.get(ctx.activeAccountId)?.chatStatus === 'AVAILABLE' : false
       }));
+  }
+
+  #mask(value, keepStart = 3, keepEnd = 2) {
+    const text = String(value ?? '');
+    if (text.length <= keepStart + keepEnd) return '*'.repeat(text.length);
+    return `${text.slice(0, keepStart)}${'*'.repeat(Math.min(8, text.length - keepStart - keepEnd))}${text.slice(-keepEnd)}`;
+  }
+
+  #logAccountInput(account, normalized) {
+    const tokenText = String(account.playerToken ?? '');
+    const playerIdText = String(account.playerId ?? '');
+    const data = {
+      accountId: account.id,
+      ip: String(account.ip || ''),
+      port: { rawType: typeof account.port, normalizedType: typeof normalized.portValue, value: normalized.portValue },
+      playerId: { rawType: typeof account.playerId, normalizedType: typeof normalized.playerIdValue, length: playerIdText.length, masked: this.#mask(playerIdText, 5, 4) },
+      playerToken: {
+        rawType: typeof account.playerToken,
+        normalizedType: typeof normalized.playerTokenValue,
+        digits: tokenText.replace(/^-/, '').length,
+        finite: Number.isFinite(normalized.playerTokenValue),
+        integer: Number.isInteger(normalized.playerTokenValue),
+        safeInteger: Number.isSafeInteger(normalized.playerTokenValue),
+        masked: this.#mask(tokenText, 2, 2)
+      }
+    };
+    console.log(`[Rust+] auth-input ${account.id}: ${JSON.stringify(data)}`);
   }
 
   #scheduleReconnect(session) {

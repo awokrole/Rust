@@ -47,7 +47,7 @@ function normalizePairingEvent(event) {
       ip: String(ip).trim(),
       port: portNum,
       playerId: steamText,
-      playerToken: Number(tokenText),
+      playerToken: tokenText,
       serverId: String(getCaseInsensitive(obj, ['id', 'serverId']) || ''),
       name: String(getCaseInsensitive(obj, ['name', 'serverName']) || getCaseInsensitive(event, ['body', 'title']) || 'Rust server').trim()
     };

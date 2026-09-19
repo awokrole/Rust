@@ -37,18 +37,18 @@ class SecretBox {
   }
 
   encrypt(value) {
-    if (!this.key) return { plaintext: Number(value) };
+    if (!this.key) return { plaintextText: String(value) };
     return this.#encryptString(String(value));
   }
 
   decrypt(payload) {
     if (payload == null) throw new Error('Brak playerToken.');
-    if (typeof payload === 'number') return payload;
-    if (typeof payload === 'string' && /^-?\d+$/.test(payload)) return Number(payload);
-    if (typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'plaintext')) return Number(payload.plaintext);
+    if (typeof payload === 'number') return String(payload);
+    if (typeof payload === 'string' && /^-?\d+$/.test(payload)) return payload;
+    if (typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'plaintext')) return String(payload.plaintext);
     const clear = this.#decryptString(payload);
     if (!/^-?\d+$/.test(clear)) throw new Error('Nieprawidłowy playerToken po odszyfrowaniu.');
-    return Number(clear);
+    return clear;
   }
 
   encryptText(value) { return this.#encryptString(value); }

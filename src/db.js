@@ -99,7 +99,7 @@ class JsonDb {
     if (!stored) return null;
     const copy = { ...stored };
     const secret = copy.playerTokenSecret ?? copy.playerToken;
-    copy.playerToken = this.secretBox ? this.secretBox.decrypt(secret) : Number(secret?.plaintext ?? secret);
+    copy.playerToken = this.secretBox ? this.secretBox.decrypt(secret) : String(secret?.plaintextText ?? secret?.plaintext ?? secret);
     delete copy.playerTokenSecret;
     return copy;
   }

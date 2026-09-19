@@ -63,7 +63,8 @@ class DiscordManager {
 
   async #registerCommands() {
     const commands = [
-      new SlashCommandBuilder().setName('pair').setDescription('Wygeneruj kod dla RustHelperPairing.exe.'),
+      new SlashCommandBuilder().setName('pair').setDescription('Rozpocznij pairing Rust+ krok po kroku.'),
+      new SlashCommandBuilder().setName('pair-help').setDescription('Pokaż instrukcję pairingu Rust+ z EXE.'),
       new SlashCommandBuilder().setName('pair-status').setDescription('Sprawdź stan ostatniego pairingu Rust+.'),
       new SlashCommandBuilder().setName('link').setDescription('Kod Discord ↔ Steam do komend w grze.'),
       new SlashCommandBuilder().setName('unlink').setDescription('Usuń połączenie Discord ↔ Steam.'),
@@ -93,7 +94,36 @@ class DiscordManager {
         if (!(await this.hasAccessRole(uid))) return interaction.reply({ content:'⛔ Brak wymaganej roli Discord.', flags:ephemeral });
         const t = this.pairingManager.createTicket(uid);
         const mins = Math.max(1, Math.ceil((t.expiresAt-Date.now())/60000));
-        return interaction.reply({ content:`🔐 Kod pairingu: **${t.code}**\n1. Uruchom \`RustHelperPairing.exe\`\n2. Wklej ten kod\n3. W Rust kliknij **Pair with Server / Resend**\nKod ważny ~${mins} min.\n\nHasło Steam nie trafia do bota ani na Discord.`, flags:ephemeral });
+        return interaction.reply({ content:[
+          '🔐 **Rozpoczęto pairing Rust+**',
+          `Kod: **${t.code}**`,
+          '',
+          '**Wykonaj to dokładnie w tej kolejności:**',
+          '1. Uruchom `RustHelperPairing.exe`.',
+          `2. Wklej w EXE kod **${t.code}** i zatwierdź.`,
+          '3. Poczekaj, aż EXE pokaże, że **nasłuchuje / czeka na Pair with Server**.',
+          '4. Dopiero teraz wejdź do Rust na serwer, który chcesz dodać.',
+          '5. Otwórz Rust+ / Companion i kliknij **Pair with Server** albo **Resend Pairing**.',
+          '6. Nie zamykaj EXE. Po wykryciu serwera helper sam wyśle dane do bota.',
+          '7. Na Discordzie dostaniesz potwierdzenie i automatyczną diagnostykę Rust+.',
+          '',
+          `⏱️ Kod jest ważny około **${mins} min**.`,
+          '🔒 Rust Helper nie prosi o hasło Steam i go nie zapisuje.'
+        ].join('\n'), flags:ephemeral });
+      }
+      if (interaction.commandName === 'pair-help') {
+        return interaction.reply({ content:[
+          '🧭 **Jak połączyć Rust+ z botem**',
+          '1. Użyj `/pair` na Discordzie.',
+          '2. Uruchom `RustHelperPairing.exe`.',
+          '3. Wpisz kod otrzymany z `/pair`.',
+          '4. Poczekaj na komunikat EXE, że czeka na pairing.',
+          '5. W Rust kliknij **Pair with Server / Resend Pairing**.',
+          '6. Po kilku sekundach dostaniesz na Discordzie potwierdzenie.',
+          '',
+          'Jeśli kliknąłeś Pair w grze za wcześnie, użyj **Resend Pairing** po uruchomieniu EXE.',
+          'Hasło Steam nie jest przesyłane do Rust Helper.'
+        ].join('\n'), flags:ephemeral });
       }
       if (interaction.commandName === 'pair-status') {
         const s=this.pairingManager.status(uid);

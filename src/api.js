@@ -9,7 +9,7 @@ class PairingApi {
 
   start() {
     this.app.use(express.json({ limit: '128kb' }));
-    this.app.get('/health', (_, res) => res.json({ ok: true, version: '0.5.1', mode: 'discord-only' }));
+    this.app.get('/health', (_, res) => res.json({ ok: true, version: '0.5.2', mode: 'discord-only' }));
     this.app.post('/api/pairing/:code/complete', (req, res) => {
       try {
         const result = this.pairing.completeTicket(String(req.params.code || ''), req.body);

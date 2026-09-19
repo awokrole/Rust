@@ -1,8 +1,8 @@
 {
   "name": "rust-helper-bot",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
-  "description": "Discord-only Rust+ helper bot with RustClash item calculator, events, Oil Rigs, deaths and multi-account routing.",
+  "description": "Discord-only Rust+ helper bot with item crafting calculator powered by Rust game data API, events, Oil Rigs, deaths and multi-account routing.",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -17,7 +17,6 @@
     "@liamcottle/rustplus.js": "2.5.0",
     "discord.js": "^14.27.0",
     "dotenv": "^16.6.1",
-    "express": "^5.1.0",
-    "cheerio": "^1.1.2"
+    "express": "^5.1.0"
   }
 }

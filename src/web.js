@@ -31,7 +31,7 @@ class WebPanel {
     }
     this.app.use(express.urlencoded({ extended: false }));
     this.app.use(express.json({ limit: '128kb' }));
-    this.app.get('/health', (_, res) => res.json({ ok: true, version: '0.4.1' }));
+    this.app.get('/health', (_, res) => res.json({ ok: true, version: '0.4.2' }));
     this.app.get('/', (req, res) => this.#home(req, res));
     this.app.get('/auth/discord', (req, res) => this.#login(req, res));
     this.app.get('/auth/discord/callback', (req, res) => this.#callback(req, res));
@@ -82,7 +82,12 @@ class WebPanel {
     const visible = isAdmin ? statuses : statuses.filter((a) => a.ownerDiscordId === user.id || String(a.playerId) === String(steamId || ''));
     const teams = this.rustManager.listTeams();
 
-    const accountsHtml = visible.length ? visible.map((a) => `<div class="card"><div class="row"><strong>${esc(a.name)}</strong><span class="pill ${a.connected?'ok':'bad'}">${a.connected?'CONNECTED':'OFFLINE'}</span><span class="pill">${esc(a.senderRole)}</span></div><div class="muted">${esc(a.ip)}:${esc(a.port)} · Steam ${esc(a.playerId)} · ${a.teamId ? esc(a.teamId) : 'team niewykryty'}</div><form method="post" action="/account/remove" onsubmit="return confirm('Usunąć konto?')"><input type="hidden" name="id" value="${esc(a.id)}"><button class="danger">Usuń</button></form></div>`).join('') : '<div class="card muted">Brak kont Rust+.</div>';
+    const accountsHtml = visible.length ? visible.map((a) => {
+      const teamLabel = a.teamStatus === 'TEAM_OK' ? (a.teamId || 'TEAM OK') : a.teamStatus === 'NO_TEAM' ? 'NO TEAM' : a.teamStatus === 'TEAM_API_ERROR' ? 'TEAM API ERROR' : a.teamStatus === 'CHECKING' ? 'CHECKING TEAM' : 'UNASSIGNED';
+      const teamClass = a.teamStatus === 'TEAM_OK' ? 'ok' : a.teamStatus === 'NO_TEAM' ? 'warn' : a.teamStatus === 'TEAM_API_ERROR' ? 'bad' : '';
+      const detail = a.teamStatus === 'TEAM_API_ERROR' && a.teamError ? ` · błąd: ${esc(a.teamError)}` : '';
+      return `<div class="card"><div class="row"><strong>${esc(a.name)}</strong><span class="pill ${a.connected?'ok':'bad'}">${a.connected?'CONNECTED':'OFFLINE'}</span><span class="pill ${teamClass}">${esc(teamLabel)}</span><span class="pill">${esc(a.senderRole)}</span></div><div class="muted">${esc(a.ip)}:${esc(a.port)} · Steam ${esc(a.playerId)}${detail}</div><form method="post" action="/account/remove" onsubmit="return confirm('Usunąć konto?')"><input type="hidden" name="id" value="${esc(a.id)}"><button class="danger">Usuń</button></form></div>`;
+    }).join('') : '<div class="card muted">Brak kont Rust+.</div>';
     const teamHtml = teams.length ? teams.map((t) => `<div class="card"><strong>${esc(t.id)}</strong> · ${esc(t.serverKey)}<div>ACTIVE: <code>${esc(t.activeAccountId || '-')}</code></div><div class="muted">Konta: ${t.accountIds.map(esc).join(', ')} · członkowie teamu: ${t.memberSteamIds.length}</div></div>`).join('') : '<div class="card muted">Brak wykrytych teamów.</div>';
 
     let pairingCard = '';

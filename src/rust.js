@@ -33,7 +33,9 @@ class RustManager {
       account, rust, connected: false, connectedAt: 0, reconnectTimer: null,
       pollTimer: null, teamPollTimer: null, pollInFlight: false, teamPollInFlight: false,
       chatPrimed: false, recentMessages: new Set(), lastPollErrorAt: 0,
-      teamInfo: null, teamContextId: null, eventPollTimer: null, eventPollInFlight: false, eventPrimed: false
+      teamInfo: null, teamContextId: null, teamStatus: 'CHECKING', teamError: null, teamStatusChangedAt: Date.now(),
+      teamInfoDebugLogged: false, teamContextDebugLogged: false,
+      eventPollTimer: null, eventPollInFlight: false, eventPrimed: false
     };
     this.sessions.set(account.id, session);
 
@@ -42,9 +44,10 @@ class RustManager {
       session.connectedAt = Date.now();
       session.chatPrimed = false;
       console.log(`[Rust+] connected: ${account.id} (${account.name || account.ip})`);
+      session.teamStatus = 'CHECKING';
+      session.teamError = null;
       this.#refreshTeamInfo(session).catch(() => {});
       this.#startTeamPolling(session);
-      this.#startChatPolling(session);
       this.#startEventPolling(session);
     });
 
@@ -57,6 +60,8 @@ class RustManager {
       session.connected = false;
       session.teamInfo = null;
       session.teamContextId = null;
+      session.teamStatus = 'DISCONNECTED';
+      session.teamError = null;
       this.#stopChatPolling(session);
       this.#stopTeamPolling(session);
       this.#stopEventPolling(session);
@@ -94,7 +99,9 @@ class RustManager {
         connected: Boolean(s?.connected),
         teamId: ctx?.id || null,
         senderRole: ctx ? (ctx.activeAccountId === account.id ? 'ACTIVE' : 'BACKUP') : 'UNASSIGNED',
-        teamSize: ctx?.memberSteamIds?.length || 0
+        teamSize: ctx?.memberSteamIds?.length || 0,
+        teamStatus: s?.teamStatus || (s?.connected ? 'CHECKING' : 'DISCONNECTED'),
+        teamError: s?.teamError || null
       };
     });
   }
@@ -125,10 +132,20 @@ class RustManager {
   }
 
   #startChatPolling(session) {
-    this.#stopChatPolling(session);
+    if (!session.connected || session.teamStatus !== 'TEAM_OK' || !session.teamInfo) return;
+    if (session.pollTimer) return;
     const poll = () => this.#pollTeamChat(session).catch((err) => {
+      const code = this.#errorCode(err);
+      if (code === 'not_found') {
+        this.#setTeamState(session, 'NO_TEAM', 'not_found');
+        session.teamInfo = null;
+        session.teamContextId = null;
+        this.#stopChatPolling(session);
+        this.#rebuildTeams();
+        return;
+      }
       const now = Date.now();
-      if (now - session.lastPollErrorAt > 15000) {
+      if (now - session.lastPollErrorAt > 60000) {
         session.lastPollErrorAt = now;
         console.error(`[Rust+] team-chat poll failed (${session.account.id}):`, err?.message || err);
       }
@@ -142,7 +159,13 @@ class RustManager {
   #startTeamPolling(session) {
     this.#stopTeamPolling(session);
     const poll = () => this.#refreshTeamInfo(session).catch((err) => {
-      console.error(`[Rust+] team-info failed (${session.account.id}):`, err?.message || err);
+      const code = this.#errorCode(err);
+      if (code === 'not_found') return;
+      const now = Date.now();
+      if (!session.lastTeamErrorAt || now - session.lastTeamErrorAt > 60000) {
+        session.lastTeamErrorAt = now;
+        console.error(`[Rust+] team-info failed (${session.account.id}):`, err?.message || err);
+      }
     });
     session.teamPollTimer = setInterval(poll, this.teamInfoPollMs);
   }
@@ -203,20 +226,121 @@ class RustManager {
     } finally { session.eventPollInFlight = false; }
   }
 
+  #errorCode(err) {
+    if (!err) return '';
+    return String(err.error || err.code || err.message || err).toLowerCase();
+  }
+
+  #setTeamState(session, status, error = null) {
+    const changed = session.teamStatus !== status || session.teamError !== error;
+    session.teamStatus = status;
+    session.teamError = error;
+    if (changed) {
+      session.teamStatusChangedAt = Date.now();
+      const suffix = error ? ` (${error})` : '';
+      console.log(`[Rust+] team status ${session.account.id}: ${status}${suffix}`);
+    }
+  }
+
+  #requestTeamInfo(session, timeoutMs = 5000) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error('team_info_timeout'));
+      }, timeoutMs);
+      try {
+        session.rust.getTeamInfo((message) => {
+          if (settled) return true;
+          settled = true;
+          clearTimeout(timer);
+          const response = message?.response;
+          if (!response) return reject(new Error('team_info_empty_response'));
+          if (response.error) return reject(response.error);
+          if (!response.teamInfo) return reject(new Error('team_info_missing_payload'));
+          resolve({ info: response.teamInfo, raw: message });
+          return true;
+        });
+      } catch (err) {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+      }
+    });
+  }
+
+  #requestTeamChat(session, timeoutMs = 5000) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error('team_chat_timeout'));
+      }, timeoutMs);
+      const done = (message) => {
+        if (settled) return true;
+        settled = true;
+        clearTimeout(timer);
+        const response = message?.response;
+        if (!response) { reject(new Error('team_chat_empty_response')); return true; }
+        if (response.error) { reject(response.error); return true; }
+        resolve(response.teamChat || { messages: [] });
+        return true;
+      };
+      try {
+        // Newer rustplus.js versions expose getTeamChat; older ones can still use sendRequest.
+        if (typeof session.rust.getTeamChat === 'function') session.rust.getTeamChat(done);
+        else session.rust.sendRequest({ getTeamChat: {} }, done);
+      } catch (err) {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+      }
+    });
+  }
+
   async #refreshTeamInfo(session) {
     if (!session.connected || session.teamPollInFlight || !this.sessions.has(session.account.id)) return;
     session.teamPollInFlight = true;
     try {
-      const response = await session.rust.sendRequestAsync({ getTeamInfo: {} }, 5000);
-      const info = response?.teamInfo;
-      if (!info) throw new Error('Brak teamInfo w odpowiedzi Rust+.');
+      const { info, raw } = await this.#requestTeamInfo(session, 5000);
       const members = (info.members || []).map((m) => ({ ...m, steamId: String(m.steamId) }));
+      const memberSteamIds = uniqSorted(members.map((m) => m.steamId).filter(Boolean));
+      if (!memberSteamIds.length) throw new Error('team_info_empty_members');
+
       session.teamInfo = {
         leaderSteamId: String(info.leaderSteamId || ''),
         members,
-        memberSteamIds: uniqSorted(members.map((m) => m.steamId))
+        memberSteamIds
       };
+      this.#setTeamState(session, 'TEAM_OK', null);
+      if (!session.teamInfoDebugLogged) {
+        session.teamInfoDebugLogged = true;
+        console.log(`[Rust+] team-info OK (${session.account.id}): leader=${session.teamInfo.leaderSteamId || '-'} members=${memberSteamIds.length}`);
+        if (process.env.RUST_TEAM_DEBUG === 'true') {
+          const safe = { responseKeys: Object.keys(raw?.response || {}), leaderSteamId: session.teamInfo.leaderSteamId, memberSteamIds };
+          console.log(`[Rust+] team-info diagnostic (${session.account.id}): ${JSON.stringify(safe)}`);
+        }
+      }
       this.#rebuildTeams();
+      this.#startChatPolling(session);
+    } catch (err) {
+      const code = this.#errorCode(err);
+      session.teamInfo = null;
+      session.teamContextId = null;
+      this.#stopChatPolling(session);
+      this.#rebuildTeams();
+      if (code === 'not_found') {
+        this.#setTeamState(session, 'NO_TEAM', 'not_found');
+        return;
+      }
+      this.#setTeamState(session, 'TEAM_API_ERROR', code || 'unknown');
+      throw err;
     } finally { session.teamPollInFlight = false; }
   }
 
@@ -301,11 +425,11 @@ class RustManager {
   }
 
   async #pollTeamChat(session) {
-    if (!session.connected || session.pollInFlight || !this.sessions.has(session.account.id)) return;
+    if (!session.connected || session.pollInFlight || session.teamStatus !== 'TEAM_OK' || !this.sessions.has(session.account.id)) return;
     session.pollInFlight = true;
     try {
-      const response = await session.rust.sendRequestAsync({ getTeamChat: {} }, 5000);
-      const messages = response?.teamChat?.messages || [];
+      const teamChat = await this.#requestTeamChat(session, 5000);
+      const messages = teamChat?.messages || [];
       if (!session.chatPrimed) {
         for (const m of messages) this.#rememberMessage(session, m);
         session.chatPrimed = true;
